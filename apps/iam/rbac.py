@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Iterable
 
 from apps.iam.models import UserRole
@@ -12,6 +11,7 @@ class Perm:
     # IAM
     IAM_USERS_READ = "iam.users.read"
     IAM_USERS_WRITE = "iam.users.write"
+    IAM_USERS_HARD_DELETE = "iam.users.hard_delete"
 
     # Brands
     BRANDS_READ = "brands.read"
@@ -20,22 +20,33 @@ class Perm:
     # Leads (пример на будущее)
     LEADS_READ = "leads.read"
     LEADS_WRITE = "leads.write"
+    LEADS_STATUS_WRITE = "leads.status.write"
+    LEADS_ASSIGN_MANAGER = "leads.assign_manager"
+
+    # Lead status catalog
+    LEAD_STATUSES_READ = "lead_statuses.read"
+    LEAD_STATUSES_WRITE = "lead_statuses.write"
+    LEAD_STATUSES_HARD_DELETE = "lead_statuses.hard_delete"
 
 
 ROLE_PERMS: dict[str, set[str]] = {
     UserRole.SUPERUSER: {
-        Perm.IAM_USERS_READ, Perm.IAM_USERS_WRITE,
+        Perm.IAM_USERS_READ, Perm.IAM_USERS_WRITE, Perm.IAM_USERS_HARD_DELETE,
         Perm.BRANDS_READ, Perm.BRANDS_WRITE,
-        Perm.LEADS_READ, Perm.LEADS_WRITE,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
+        Perm.LEAD_STATUSES_READ, Perm.LEAD_STATUSES_WRITE, Perm.LEAD_STATUSES_HARD_DELETE,
     },
     UserRole.ADMIN: {
         Perm.IAM_USERS_READ, Perm.IAM_USERS_WRITE,
         Perm.BRANDS_READ, Perm.BRANDS_WRITE,
-        Perm.LEADS_READ, Perm.LEADS_WRITE,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
+        Perm.LEAD_STATUSES_READ, Perm.LEAD_STATUSES_WRITE,
     },
     UserRole.TEAMLEADER: {
+        Perm.IAM_USERS_READ,
         Perm.BRANDS_READ,
-        Perm.LEADS_READ, Perm.LEADS_WRITE,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
+        Perm.LEAD_STATUSES_READ,
     },
     UserRole.MANAGER: {
         Perm.BRANDS_READ,

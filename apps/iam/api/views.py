@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from django.contrib.auth import get_user_model
 from django.conf import settings
+from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.exceptions import AuthenticationFailed, NotAuthenticated, PermissionDenied
 
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .serializers import LoginSerializer
+from apps.iam.rbac import Perm
+from .rbac_mixins import RBACActionMixin
+from .rbac_permissions import RBACPermission
+from .serializers import LoginSerializer, UserAdminSerializer
+
+User = get_user_model()
 
 
 def _origin_allowed(request) -> bool:
@@ -17,6 +24,11 @@ def _origin_allowed(request) -> bool:
     if not origin:
         return True
     return origin in getattr(settings, "CORS_ALLOWED_ORIGINS", [])
+
+
+def _ensure_origin_allowed(request) -> None:
+    if not _origin_allowed(request):
+        raise PermissionDenied("Origin not allowed")
 
 
 def _set_refresh_cookie(response: Response, refresh: str) -> None:
@@ -52,8 +64,7 @@ def _blacklist_refresh_token(raw_refresh: str | None) -> None:
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
-    if not _origin_allowed(request):
-        return Response({"detail": "Origin not allowed"}, status=status.HTTP_403_FORBIDDEN)
+    _ensure_origin_allowed(request)
 
     ser = LoginSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
@@ -76,13 +87,12 @@ def login_view(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def refresh_view(request):
-    if not _origin_allowed(request):
-        return Response({"detail": "Origin not allowed"}, status=status.HTTP_403_FORBIDDEN)
+    _ensure_origin_allowed(request)
 
     cookie_name = settings.JWT_REFRESH_COOKIE_NAME
     raw_refresh = request.COOKIES.get(cookie_name)
     if not raw_refresh:
-        return Response({"detail": "Missing refresh cookie"}, status=status.HTTP_401_UNAUTHORIZED)
+        raise NotAuthenticated("Missing refresh cookie")
 
     try:
         refresh = RefreshToken(raw_refresh)
@@ -98,14 +108,13 @@ def refresh_view(request):
         _set_refresh_cookie(resp, str(refresh))
         return resp
     except Exception:
-        return Response({"detail": "Invalid refresh token"}, status=status.HTTP_401_UNAUTHORIZED)
+        raise AuthenticationFailed("Invalid refresh token")
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def logout_view(request):
-    if not _origin_allowed(request):
-        return Response({"detail": "Origin not allowed"}, status=status.HTTP_403_FORBIDDEN)
+    _ensure_origin_allowed(request)
 
     cookie_name = settings.JWT_REFRESH_COOKIE_NAME
     _blacklist_refresh_token(request.COOKIES.get(cookie_name))
@@ -123,3 +132,17 @@ def me_view(request):
         {"id": u.id, "username": u.username, "role": getattr(u, "role", None)},
         status=status.HTTP_200_OK,
     )
+
+
+class UserAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    queryset = User.objects.all().order_by("id")
+    serializer_class = UserAdminSerializer
+    permission_classes = [IsAuthenticated, RBACPermission]
+    action_perms = {
+        "list": (Perm.IAM_USERS_READ,),
+        "retrieve": (Perm.IAM_USERS_READ,),
+        "create": (Perm.IAM_USERS_WRITE,),
+        "update": (Perm.IAM_USERS_WRITE,),
+        "partial_update": (Perm.IAM_USERS_WRITE,),
+        "destroy": (Perm.IAM_USERS_HARD_DELETE,),
+    }

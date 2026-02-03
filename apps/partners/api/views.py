@@ -62,7 +62,11 @@ class PartnerLeadViewSet(
     def get_queryset(self):
         # ЖЕСТКАЯ изоляция: только лиды партнёра
         partner = self.request.partner_auth.partner
-        return Lead.objects.filter(partner=partner).select_related("source").order_by("-received_at")
+        return (
+            Lead.objects.filter(partner=partner)
+            .select_related("source", "pipeline", "status")
+            .order_by("-received_at")
+        )
 
     def get_serializer_class(self):
         if self.action == "create":

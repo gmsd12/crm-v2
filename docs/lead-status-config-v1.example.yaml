@@ -1,0 +1,86 @@
+# Single-instance config: один инстанс = одна компания.
+pipeline:
+  code: default_sales
+  name: "Default Sales Pipeline"
+  is_default: true
+
+statuses:
+  - code: NEW
+    name: "Новый"
+    order: 10
+    color: "#4F46E5"
+    is_default_for_new_leads: true
+    is_terminal: false
+    counts_for_conversion: false
+
+  - code: IN_PROGRESS
+    name: "В работе"
+    order: 20
+    color: "#0EA5E9"
+    is_default_for_new_leads: false
+    is_terminal: false
+    counts_for_conversion: false
+
+  - code: QUALIFIED
+    name: "Квалифицирован"
+    order: 30
+    color: "#14B8A6"
+    is_default_for_new_leads: false
+    is_terminal: false
+    counts_for_conversion: true
+
+  - code: PROPOSAL
+    name: "Предложение"
+    order: 40
+    color: "#F59E0B"
+    is_default_for_new_leads: false
+    is_terminal: false
+    counts_for_conversion: true
+
+  - code: WON
+    name: "Успешно"
+    order: 50
+    color: "#22C55E"
+    is_default_for_new_leads: false
+    is_terminal: true
+    counts_for_conversion: true
+
+  - code: LOST
+    name: "Проигран"
+    order: 60
+    color: "#EF4444"
+    is_default_for_new_leads: false
+    is_terminal: true
+    counts_for_conversion: false
+
+  - code: REJECTED
+    name: "Отклонен"
+    order: 70
+    color: "#6B7280"
+    is_default_for_new_leads: false
+    is_terminal: true
+    counts_for_conversion: false
+
+transitions:
+  - from: NEW
+    to: IN_PROGRESS
+  - from: NEW
+    to: REJECTED
+  - from: IN_PROGRESS
+    to: QUALIFIED
+  - from: IN_PROGRESS
+    to: REJECTED
+  - from: QUALIFIED
+    to: PROPOSAL
+  - from: QUALIFIED
+    to: REJECTED
+  - from: PROPOSAL
+    to: WON
+  - from: PROPOSAL
+    to: LOST
+  - from: LOST
+    to: IN_PROGRESS
+    requires_comment: true
+  - from: REJECTED
+    to: IN_PROGRESS
+    requires_comment: true

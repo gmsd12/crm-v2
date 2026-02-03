@@ -1,0 +1,30 @@
+%% Reference workflow template for a single-company CRM instance.
+flowchart LR
+    NEW["NEW\n(новый)"] --> IN_PROGRESS["IN_PROGRESS\n(в работе)"]
+    NEW --> REJECTED["REJECTED\n(отклонен)"]
+
+    IN_PROGRESS --> QUALIFIED["QUALIFIED\n(квалифицирован)"]
+    IN_PROGRESS --> REJECTED
+    IN_PROGRESS --> ON_HOLD["ON_HOLD\n(пауза)"]
+
+    ON_HOLD --> IN_PROGRESS
+    ON_HOLD --> REJECTED
+
+    QUALIFIED --> PROPOSAL["PROPOSAL\n(предложение)"]
+    QUALIFIED --> REJECTED
+
+    PROPOSAL --> WON["WON\n(успешно)"]
+    PROPOSAL --> LOST["LOST\n(проигран)"]
+    PROPOSAL --> NEGOTIATION["NEGOTIATION\n(переговоры)"]
+
+    NEGOTIATION --> PROPOSAL
+    NEGOTIATION --> WON
+    NEGOTIATION --> LOST
+
+    REJECTED --> REOPENED["REOPENED\n(переоткрыт)"]
+    LOST --> REOPENED
+    REOPENED --> IN_PROGRESS
+
+    WON --> ARCHIVED["ARCHIVED\n(архив)"]
+    LOST --> ARCHIVED
+    REJECTED --> ARCHIVED
