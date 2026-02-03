@@ -39,6 +39,16 @@ def _clear_refresh_cookie(response: Response) -> None:
     )
 
 
+def _blacklist_refresh_token(raw_refresh: str | None) -> None:
+    if not raw_refresh:
+        return
+    try:
+        RefreshToken(raw_refresh).blacklist()
+    except Exception:
+        # Не валим запрос, даже если токен битый/уже в blacklist.
+        return
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
@@ -78,9 +88,11 @@ def refresh_view(request):
         refresh = RefreshToken(raw_refresh)
         access = str(refresh.access_token)
 
-        # ROTATE_REFRESH_TOKENS=True => надо отдать новый refresh
-        refresh.set_jti()
-        refresh.set_exp()
+        if settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False):
+            if settings.SIMPLE_JWT.get("BLACKLIST_AFTER_ROTATION", False):
+                _blacklist_refresh_token(raw_refresh)
+            refresh.set_jti()
+            refresh.set_exp()
 
         resp = Response({"access": access}, status=status.HTTP_200_OK)
         _set_refresh_cookie(resp, str(refresh))
@@ -94,6 +106,9 @@ def refresh_view(request):
 def logout_view(request):
     if not _origin_allowed(request):
         return Response({"detail": "Origin not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    cookie_name = settings.JWT_REFRESH_COOKIE_NAME
+    _blacklist_refresh_token(request.COOKIES.get(cookie_name))
 
     resp = Response({"ok": True}, status=status.HTTP_200_OK)
     _clear_refresh_cookie(resp)
