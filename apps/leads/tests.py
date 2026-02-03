@@ -97,7 +97,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_default_for_new_leads=True,
             is_active=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, payload={})
+        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
         self._auth(admin)
 
         response = self.client.patch(
@@ -122,7 +122,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_default_for_new_leads=True,
             is_active=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, payload={})
+        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(f"/api/v1/leads/statuses/{status_obj.id}/soft_delete/", {}, format="json")
@@ -185,7 +185,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             name="Hard Used",
             is_default_for_new_leads=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, payload={})
+        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
         self._auth(superuser)
 
         response = self.client.delete(f"/api/v1/leads/statuses/{status_obj.id}/")
@@ -272,7 +272,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={"x": 1})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"x": 1})
         self._auth(admin)
 
         response = self.client.post(
@@ -301,7 +301,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         pipeline = Pipeline.objects.create(code="wf_invalid", name="Workflow Invalid", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(pipeline=pipeline, code="WON", name="Won", is_terminal=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -328,7 +328,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=True,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
         self._auth(admin)
 
         no_reason = self.client.post(
@@ -361,7 +361,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -385,7 +385,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Single", code="partner-assign-single")
         pipeline = Pipeline.objects.create(code="wf_assign_single", name="Workflow Assign Single", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -418,7 +418,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Single Deny", code="partner-assign-single-deny")
         pipeline = Pipeline.objects.create(code="wf_assign_single_deny", name="Workflow Assign Single Deny", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(manager_actor)
 
         response = self.client.post(
@@ -439,7 +439,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Reassign Single", code="partner-reassign-single")
         pipeline = Pipeline.objects.create(code="wf_reassign_single", name="Workflow Reassign Single", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_old, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, manager=manager_old, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -466,7 +466,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign RET", code="partner-assign-ret")
         pipeline = Pipeline.objects.create(code="wf_assign_ret", name="Workflow Assign RET", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -490,8 +490,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Bulk", code="partner-assign-bulk")
         pipeline = Pipeline.objects.create(code="wf_assign_bulk", name="Workflow Assign Bulk", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -532,7 +532,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Bulk Partial", code="partner-assign-bulk-partial")
         pipeline = Pipeline.objects.create(code="wf_assign_bulk_partial", name="Workflow Assign Bulk Partial", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         unknown_id = uuid4()
         self._auth(admin)
 
@@ -571,7 +571,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Bulk Deny", code="partner-assign-bulk-deny")
         pipeline = Pipeline.objects.create(code="wf_assign_bulk_deny", name="Workflow Assign Bulk Deny", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(ret)
 
         response = self.client.post(
@@ -598,7 +598,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Unassign Single", code="partner-unassign-single")
         pipeline = Pipeline.objects.create(code="wf_unassign_single", name="Workflow Unassign Single", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -627,8 +627,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Unassign Bulk", code="partner-unassign-bulk")
         pipeline = Pipeline.objects.create(code="wf_unassign_bulk", name="Workflow Unassign Bulk", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -667,7 +667,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Unassign Bulk Partial", code="partner-unassign-bulk-partial")
         pipeline = Pipeline.objects.create(code="wf_unassign_bulk_partial", name="Workflow Unassign Bulk Partial", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         unknown_id = uuid4()
         self._auth(admin)
 
@@ -709,7 +709,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Unassign Bulk Deny", code="partner-unassign-bulk-deny")
         pipeline = Pipeline.objects.create(code="wf_unassign_bulk_deny", name="Workflow Unassign Bulk Deny", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(manager_actor)
 
         response = self.client.post(
@@ -735,7 +735,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Idem", code="partner-assign-idem")
         pipeline = Pipeline.objects.create(code="wf_assign_idem", name="Workflow Assign Idem", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "assign-manager-key-1"}
@@ -779,7 +779,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Assign Idem Diff", code="partner-assign-idem-diff")
         pipeline = Pipeline.objects.create(code="wf_assign_idem_diff", name="Workflow Assign Idem Diff", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "assign-manager-key-2"}
@@ -812,8 +812,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Bulk Assign Idem", code="partner-bulk-assign-idem")
         pipeline = Pipeline.objects.create(code="wf_bulk_assign_idem", name="Workflow Bulk Assign Idem", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-assign-manager-key-1"}
@@ -853,7 +853,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         partner = Partner.objects.create(name="Partner Unassign Idem", code="partner-unassign-idem")
         pipeline = Pipeline.objects.create(code="wf_unassign_idem", name="Workflow Unassign Idem", is_default=True)
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "unassign-manager-key-1"}
@@ -895,8 +895,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_default=True,
         )
         status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-unassign-manager-key-1"}
@@ -936,7 +936,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "change-status-key-1"}
@@ -994,7 +994,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "change-status-key-2"}
@@ -1031,7 +1031,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        stale_lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        stale_lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         stale_snapshot = Lead.objects.select_related("status", "pipeline").get(id=stale_lead.id)
         stale_lead.status = status_work
         stale_lead.pipeline = pipeline
@@ -1070,8 +1070,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={"n": 1})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={"n": 2})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"n": 1})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"n": 2})
         self._auth(admin)
 
         response = self.client.post(
@@ -1114,8 +1114,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-status-key-1"}
@@ -1161,8 +1161,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, payload={})
+        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1203,8 +1203,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, payload={})
+        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1256,7 +1256,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         unknown_id = uuid4()
         self._auth(admin)
 
@@ -1294,8 +1294,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1330,8 +1330,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=True,
         )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, payload={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, payload={})
+        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response_no_reason = self.client.post(
@@ -1374,7 +1374,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_active=True,
             requires_comment=False,
         )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, payload={})
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -1416,28 +1416,28 @@ class LeadStatusCatalogApiTests(APITestCase):
             partner=partner,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
         )
         lead_2 = Lead.objects.create(
             partner=partner,
             pipeline=pipeline,
             status=status_lost,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 8, 10, 0, 0)),
         )
         lead_3 = Lead.objects.create(
             partner=partner,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2025, 12, 20, 10, 0, 0)),
         )
         lead_4 = Lead.objects.create(
             partner=partner,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
         )
 
@@ -1516,21 +1516,21 @@ class LeadStatusCatalogApiTests(APITestCase):
             partner=partner_a,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
         )
         lead_a2 = Lead.objects.create(
             partner=partner_a,
             pipeline=pipeline,
             status=status_lost,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
         )
         lead_b = Lead.objects.create(
             partner=partner_b,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
         )
 
@@ -1599,21 +1599,21 @@ class LeadStatusCatalogApiTests(APITestCase):
             partner=partner_a,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
         )
         lead_b1 = Lead.objects.create(
             partner=partner_b,
             pipeline=pipeline,
             status=status_lost,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
         )
         lead_b2 = Lead.objects.create(
             partner=partner_b,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 9, 10, 0, 0)),
         )
 
@@ -1685,7 +1685,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 2, 10, 0, 0)),
         )
         lead_a2 = Lead.objects.create(
@@ -1693,7 +1693,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             pipeline=pipeline,
             status=status_lost,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 4, 10, 0, 0)),
         )
         lead_b = Lead.objects.create(
@@ -1701,7 +1701,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
         )
 
@@ -1762,7 +1762,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=ret_user,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
         )
         log = LeadStatusAuditLog.objects.create(
@@ -1811,7 +1811,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
         )
         lead_b1 = Lead.objects.create(
@@ -1819,7 +1819,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             pipeline=pipeline,
             status=status_lost,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
         )
         lead_b2 = Lead.objects.create(
@@ -1827,7 +1827,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             pipeline=pipeline,
             status=status_won,
-            payload={},
+            custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
         )
 

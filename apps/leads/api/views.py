@@ -378,7 +378,18 @@ class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["partner", "manager", "source", "pipeline", "status", "external_id"]
+    filterset_fields = [
+        "partner",
+        "manager",
+        "source",
+        "pipeline",
+        "status",
+        "external_id",
+        "phone",
+        "email",
+        "priority",
+        "is_duplicate",
+    ]
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
@@ -701,8 +712,12 @@ class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
                 .get(id=pk)
             )
             previous_manager = lead.manager
+            update_fields = ["manager", "updated_at"]
+            if getattr(previous_manager, "id", None) != manager.id:
+                lead.assigned_at = timezone.now()
+                update_fields.append("assigned_at")
             lead.manager = manager
-            lead.save(update_fields=["manager", "updated_at"])
+            lead.save(update_fields=update_fields)
             _log_manager_audit(
                 lead=lead,
                 actor_user=request.user,
@@ -812,8 +827,12 @@ class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
                 if lead is None:
                     continue
                 previous_manager = lead.manager
+                update_fields = ["manager", "updated_at"]
+                if getattr(previous_manager, "id", None) != manager.id:
+                    lead.assigned_at = timezone.now()
+                    update_fields.append("assigned_at")
                 lead.manager = manager
-                lead.save(update_fields=["manager", "updated_at"])
+                lead.save(update_fields=update_fields)
                 _log_manager_audit(
                     lead=lead,
                     actor_user=request.user,

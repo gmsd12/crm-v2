@@ -106,10 +106,38 @@ class LeadSerializer(serializers.ModelSerializer):
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
+    duplicate_of = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
-        fields = ["id", "external_id", "partner", "manager", "source", "pipeline", "status", "payload", "received_at"]
+        fields = [
+            "id",
+            "external_id",
+            "partner",
+            "manager",
+            "source",
+            "pipeline",
+            "status",
+            "full_name",
+            "phone",
+            "email",
+            "priority",
+            "next_contact_at",
+            "last_contacted_at",
+            "assigned_at",
+            "expected_revenue",
+            "currency",
+            "product",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_content",
+            "utm_term",
+            "is_duplicate",
+            "duplicate_of",
+            "custom_fields",
+            "received_at",
+        ]
 
     def get_pipeline(self, obj):
         if not obj.pipeline_id:
@@ -133,6 +161,11 @@ class LeadSerializer(serializers.ModelSerializer):
         if not obj.source_id:
             return None
         return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
+
+    def get_duplicate_of(self, obj):
+        if not obj.duplicate_of_id:
+            return None
+        return str(obj.duplicate_of_id)
 
 
 class LeadStatusChangeSerializer(serializers.Serializer):

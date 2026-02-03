@@ -1,10 +1,14 @@
 from rest_framework.test import APITestCase
+from django.core.cache import cache
+from unittest.mock import patch
 
 from datetime import timedelta
 from django.utils import timezone
 
 from apps.leads.models import Lead
 from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.pagination import PartnerLeadPagination
+from apps.partners.throttling import PartnerTokenRateThrottle
 
 
 class PartnerLeadApiTests(APITestCase):
@@ -25,7 +29,9 @@ class PartnerLeadApiTests(APITestCase):
         payload = {
             "external_id": "ext-001",
             "source_code": self.source.code,
-            "payload": {"email": "lead@example.com"},
+            "full_name": "John Doe",
+            "email": "lead@example.com",
+            "custom_fields": {"channel": "google"},
         }
         headers = {"HTTP_X_PARTNER_TOKEN": self.raw_token}
 
@@ -41,7 +47,7 @@ class PartnerLeadApiTests(APITestCase):
     def test_partner_lead_with_invalid_token_returns_401(self):
         response = self.client.post(
             "/api/v1/partner/leads/",
-            {"payload": {"email": "lead@example.com"}},
+            {"email": "lead@example.com"},
             format="json",
             HTTP_X_PARTNER_TOKEN="short",
         )
@@ -52,7 +58,7 @@ class PartnerLeadApiTests(APITestCase):
     def test_partner_lead_with_unknown_source_returns_400(self):
         response = self.client.post(
             "/api/v1/partner/leads/",
-            {"external_id": "ext-unknown", "source_code": "unknown", "payload": {"x": 1}},
+            {"external_id": "ext-unknown", "source_code": "unknown", "email": "unknown@example.com"},
             format="json",
             HTTP_X_PARTNER_TOKEN=self.raw_token,
         )
@@ -86,21 +92,21 @@ class PartnerLeadFilterApiTests(APITestCase):
             partner=self.partner,
             source=self.google_source,
             external_id="ext-google",
-            payload={"name": "Google Lead"},
+            custom_fields={"name": "Google Lead"},
             received_at=now - timedelta(hours=2),
         )
         self.lead_facebook = Lead.objects.create(
             partner=self.partner,
             source=self.fb_source,
             external_id="ext-facebook",
-            payload={"name": "Facebook Lead"},
+            custom_fields={"name": "Facebook Lead"},
             received_at=now - timedelta(hours=1),
         )
         self.lead_without_source = Lead.objects.create(
             partner=self.partner,
             source=None,
             external_id="ext-no-source",
-            payload={"name": "No Source Lead"},
+            custom_fields={"name": "No Source Lead"},
             received_at=now,
         )
 
@@ -109,7 +115,7 @@ class PartnerLeadFilterApiTests(APITestCase):
             partner=other_partner,
             source=None,
             external_id="ext-foreign",
-            payload={"name": "Foreign Lead"},
+            custom_fields={"name": "Foreign Lead"},
             received_at=now - timedelta(hours=1),
         )
 
@@ -149,3 +155,31 @@ class PartnerLeadFilterApiTests(APITestCase):
         self.assertIn("next", response.data)
         self.assertIn("previous", response.data)
         self.assertIn("results", response.data)
+
+    def test_page_size_is_limited_by_max_page_size(self):
+        with patch.object(PartnerLeadPagination, "page_size", 2), patch.object(PartnerLeadPagination, "max_page_size", 2):
+            response = self.client.get("/api/v1/partner/leads/", {"page_size": 999}, **self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_invalid_page_returns_standard_error_shape(self):
+        response = self.client.get("/api/v1/partner/leads/", {"page": 999}, **self.headers)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["error"]["code"], "not_found")
+
+    def test_throttle_returns_429_after_limit(self):
+        cache.clear()
+        with patch.object(PartnerTokenRateThrottle, "THROTTLE_RATES", {"partner_token": "2/min"}):
+            first = self.client.get("/api/v1/partner/leads/", {}, **self.headers)
+            second = self.client.get("/api/v1/partner/leads/", {}, **self.headers)
+            third = self.client.get("/api/v1/partner/leads/", {}, **self.headers)
+        cache.clear()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(third.status_code, 429)
+        self.assertEqual(third.data["error"]["code"], "throttled")
