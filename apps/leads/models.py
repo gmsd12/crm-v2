@@ -96,6 +96,12 @@ class LeadStatusTransition(BaseModel):
 
 
 class Lead(BaseModel):
+    class Priority(models.IntegerChoices):
+        LOW = 10, "Low"
+        NORMAL = 20, "Normal"
+        HIGH = 30, "High"
+        URGENT = 40, "Urgent"
+
     partner = models.ForeignKey(Partner, on_delete=models.PROTECT, related_name="leads")
     manager = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -110,9 +116,30 @@ class Lead(BaseModel):
 
     # idempotency: partner can push same external_id safely
     external_id = models.CharField(max_length=128, null=True, blank=True)
-
-    # пока гибко: сырой payload (потом нормализуем поля)
-    payload = models.JSONField(default=dict, blank=True)
+    full_name = models.CharField(max_length=255, blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    email = models.EmailField(blank=True, default="", db_index=True)
+    priority = models.PositiveSmallIntegerField(choices=Priority.choices, default=Priority.NORMAL)
+    next_contact_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_contacted_at = models.DateTimeField(null=True, blank=True)
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    expected_revenue = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default="USD")
+    product = models.CharField(max_length=255, blank=True, default="")
+    utm_source = models.CharField(max_length=255, blank=True, default="")
+    utm_medium = models.CharField(max_length=255, blank=True, default="")
+    utm_campaign = models.CharField(max_length=255, blank=True, default="")
+    utm_content = models.CharField(max_length=255, blank=True, default="")
+    utm_term = models.CharField(max_length=255, blank=True, default="")
+    is_duplicate = models.BooleanField(default=False)
+    duplicate_of = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="duplicate_leads",
+    )
+    custom_fields = models.JSONField(default=dict, blank=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
 
@@ -123,17 +150,49 @@ class Lead(BaseModel):
             models.Index(fields=["manager", "received_at"]),
             models.Index(fields=["partner", "source", "received_at"]),
             models.Index(fields=["partner", "external_id"]),
+            models.Index(fields=["partner", "phone"]),
+            models.Index(fields=["partner", "email"]),
+            models.Index(fields=["partner", "priority", "received_at"]),
         ]
         constraints = [
             models.UniqueConstraint(
                 fields=["partner", "external_id"],
                 condition=Q(external_id__isnull=False),
                 name="uniq_partner_external_id_notnull",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(expected_revenue__isnull=True) | Q(expected_revenue__gte=0),
+                name="check_lead_expected_revenue_non_negative",
+            ),
         ]
 
     def __str__(self) -> str:
         return f"Lead {self.pk} partner={self.partner_id}"
+
+
+class LeadComment(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="comments")
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="lead_comments",
+    )
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "lead_comments"
+        indexes = [
+            models.Index(fields=["lead", "created_at"]),
+            models.Index(fields=["author", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"LeadComment {self.pk} lead={self.lead_id}"
 
 
 class LeadStatusAuditEvent(models.TextChoices):
