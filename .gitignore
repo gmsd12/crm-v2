@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Env and local DB
+.env
+.env.*
+!.env.example
+*.sqlite3
+
+# IDE / OS
+.idea/
+.DS_Store
+
+# Coverage
+coverage/
+htmlcov/
+
+# Frontend artifacts (if present)
+node_modules/
+dist/
+build/
+.nuxtrc
+.nuxt/
+.next/
+.out/

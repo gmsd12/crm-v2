@@ -11,16 +11,21 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 from datetime import timedelta
 from pathlib import Path
-import os
+
 import environ
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+SETTINGS_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = SETTINGS_DIR.parent
+BASE_DIR = CONFIG_DIR.parent
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, []),
+    PARTNER_API_THROTTLE_RATE=(str, "120/min"),
+    PARTNER_LEADS_PAGE_SIZE=(int, 50),
+    PARTNER_LEADS_MAX_PAGE_SIZE=(int, 200),
 )
-environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
+environ.Env.read_env(BASE_DIR / ".env")
 
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="unsafe-dev-key")
 DEBUG = env("DJANGO_DEBUG")
@@ -36,10 +41,14 @@ INSTALLED_APPS = [
 
     # Third-party
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "corsheaders",
+    "django_filters",
 
     # Custom
+    "apps.partners",
+    "apps.leads",
     "apps.core",
     "apps.iam",
 ]
@@ -61,8 +70,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates']
-        ,
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -81,7 +89,7 @@ ASGI_APPLICATION = "config.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "NAME": CONFIG_DIR / "db.sqlite3",
     }
 }
 
@@ -114,6 +122,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+PARTNER_API_THROTTLE_RATE = env("PARTNER_API_THROTTLE_RATE", default="120/min")
+PARTNER_LEADS_PAGE_SIZE = env.int("PARTNER_LEADS_PAGE_SIZE", default=50)
+PARTNER_LEADS_MAX_PAGE_SIZE = env.int("PARTNER_LEADS_MAX_PAGE_SIZE", default=200)
+
 # DRF
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
@@ -121,12 +133,18 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_FILTER_BACKENDS": (
+        "django_filters.rest_framework.DjangoFilterBackend",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "partner_token": PARTNER_API_THROTTLE_RATE,
+    },
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
     "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": False,  # можно включить позже с blacklist app
+    "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,
 }
 JWT_REFRESH_COOKIE_NAME = env("JWT_REFRESH_COOKIE_NAME", default="refresh")
