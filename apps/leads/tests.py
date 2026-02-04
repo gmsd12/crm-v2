@@ -13,6 +13,7 @@ from django.utils import timezone
 from apps.iam.models import UserRole
 from apps.leads.models import (
     Lead,
+    LeadComment,
     LeadStatus,
     LeadStatusAuditEvent,
     LeadStatusAuditLog,
@@ -1888,3 +1889,143 @@ class LeadStatusCatalogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"]["code"], "validation_error")
+
+    def test_manager_can_create_lead_comment(self):
+        manager = User.objects.create_user(username="manager_comment_create", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment Create", code="partner-comment-create")
+        pipeline = Pipeline.objects.create(code="wf_comment_create", name="Workflow Comment Create", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        self._auth(manager)
+
+        response = self.client.post(
+            "/api/v1/leads/comments/",
+            {"lead": str(lead.id), "body": "First contact completed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["author"], manager.id)
+        self.assertEqual(str(response.data["lead"]), str(lead.id))
+        self.assertEqual(response.data["body"], "First contact completed")
+        self.assertTrue(
+            LeadComment.objects.filter(
+                lead=lead,
+                author=manager,
+                body="First contact completed",
+            ).exists()
+        )
+
+    def test_ret_can_create_lead_comment(self):
+        ret = User.objects.create_user(username="ret_comment_create", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Comment RET", code="partner-comment-ret")
+        pipeline = Pipeline.objects.create(code="wf_comment_ret", name="Workflow Comment RET", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        self._auth(ret)
+
+        response = self.client.post(
+            "/api/v1/leads/comments/",
+            {"lead": str(lead.id), "body": "RET note"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["author"], ret.id)
+
+    def test_manager_cannot_update_foreign_comment(self):
+        manager_a = User.objects.create_user(username="manager_comment_a", password="pass12345", role=UserRole.MANAGER)
+        manager_b = User.objects.create_user(username="manager_comment_b", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment Update", code="partner-comment-update")
+        pipeline = Pipeline.objects.create(code="wf_comment_update", name="Workflow Comment Update", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        comment = LeadComment.objects.create(lead=lead, author=manager_a, body="Initial")
+        self._auth(manager_b)
+
+        response = self.client.patch(
+            f"/api/v1/leads/comments/{comment.id}/",
+            {"body": "Edited by other manager"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        comment.refresh_from_db()
+        self.assertEqual(comment.body, "Initial")
+
+    def test_admin_can_update_foreign_comment(self):
+        admin = User.objects.create_user(username="admin_comment_update", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_comment_owner", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment Admin", code="partner-comment-admin")
+        pipeline = Pipeline.objects.create(code="wf_comment_admin", name="Workflow Comment Admin", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        comment = LeadComment.objects.create(lead=lead, author=manager, body="Initial")
+        self._auth(admin)
+
+        response = self.client.patch(
+            f"/api/v1/leads/comments/{comment.id}/",
+            {"body": "Admin updated"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        comment.refresh_from_db()
+        self.assertEqual(comment.body, "Admin updated")
+
+    def test_list_comments_can_be_filtered_by_lead(self):
+        manager = User.objects.create_user(username="manager_comment_list", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment List", code="partner-comment-list")
+        pipeline = Pipeline.objects.create(code="wf_comment_list", name="Workflow Comment List", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead_a = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        comment_a = LeadComment.objects.create(lead=lead_a, author=manager, body="A")
+        LeadComment.objects.create(lead=lead_b, author=manager, body="B")
+        self._auth(manager)
+
+        response = self.client.get("/api/v1/leads/comments/", {"lead": str(lead_a.id)})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["id"], comment_a.id)
+
+    def test_pinned_comment_is_listed_first(self):
+        manager = User.objects.create_user(username="manager_comment_pin", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment Pin", code="partner-comment-pin")
+        pipeline = Pipeline.objects.create(code="wf_comment_pin", name="Workflow Comment Pin", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        first = LeadComment.objects.create(lead=lead, author=manager, body="old regular")
+        pinned = LeadComment.objects.create(lead=lead, author=manager, body="important", is_pinned=True)
+        self._auth(manager)
+
+        response = self.client.get("/api/v1/leads/comments/", {"lead": str(lead.id)})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["id"], pinned.id)
+        self.assertEqual(response.data[1]["id"], first.id)
+
+    def test_list_comments_can_be_filtered_by_authors(self):
+        manager_a = User.objects.create_user(username="manager_comment_filter_a", password="pass12345", role=UserRole.MANAGER)
+        manager_b = User.objects.create_user(username="manager_comment_filter_b", password="pass12345", role=UserRole.MANAGER)
+        manager_c = User.objects.create_user(username="manager_comment_filter_c", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Comment Authors", code="partner-comment-authors")
+        pipeline = Pipeline.objects.create(code="wf_comment_authors", name="Workflow Comment Authors", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        LeadComment.objects.create(lead=lead, author=manager_a, body="A")
+        LeadComment.objects.create(lead=lead, author=manager_b, body="B")
+        excluded = LeadComment.objects.create(lead=lead, author=manager_c, body="C")
+        self._auth(manager_a)
+
+        response = self.client.get(
+            "/api/v1/leads/comments/",
+            {"lead": str(lead.id), "authors": f"{manager_a.id},{manager_b.id}"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {row["id"] for row in response.data}
+        self.assertEqual(len(response.data), 2)
+        self.assertNotIn(excluded.id, returned_ids)

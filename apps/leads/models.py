@@ -181,6 +181,7 @@ class LeadComment(models.Model):
         related_name="lead_comments",
     )
     body = models.TextField()
+    is_pinned = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -7,6 +7,7 @@ from rest_framework import serializers
 from apps.iam.models import UserRole
 from apps.leads.models import (
     Lead,
+    LeadComment,
     LeadStatus,
     LeadStatusAuditLog,
     LeadStatusTransition,
@@ -295,3 +296,21 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         if date_from and date_to and date_from > date_to:
             raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
         return attrs
+
+
+class LeadCommentSerializer(serializers.ModelSerializer):
+    author_username = serializers.CharField(source="author.username", read_only=True)
+
+    class Meta:
+        model = LeadComment
+        fields = [
+            "id",
+            "lead",
+            "author",
+            "author_username",
+            "body",
+            "is_pinned",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "author", "author_username", "created_at", "updated_at"]

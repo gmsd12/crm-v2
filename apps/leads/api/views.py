@@ -8,10 +8,12 @@ from statistics import median
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Count, Exists, OuterRef, Q
+from django_filters import rest_framework as django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -21,6 +23,7 @@ from apps.iam.models import UserRole
 from apps.iam.rbac import Perm
 from apps.leads.models import (
     Lead,
+    LeadComment,
     LeadStatus,
     LeadStatusAuditEvent,
     LeadStatusAuditLog,
@@ -40,6 +43,7 @@ from .serializers import (
     BulkLeadStatusChangeSerializer,
     LeadAssignManagerSerializer,
     LeadFunnelMetricsQuerySerializer,
+    LeadCommentSerializer,
     LeadSerializer,
     LeadStatusChangeSerializer,
     LeadStatusAuditLogSerializer,
@@ -360,6 +364,52 @@ class LeadStatusAuditLogViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
     }
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ["lead", "event_type", "from_status", "to_status", "actor_user", "source"]
+
+
+class NumberInFilter(django_filters.BaseInFilter, django_filters.NumberFilter):
+    pass
+
+
+class LeadCommentFilter(django_filters.FilterSet):
+    authors = NumberInFilter(field_name="author_id", lookup_expr="in")
+
+    class Meta:
+        model = LeadComment
+        fields = ["lead", "author", "authors"]
+
+
+class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    queryset = LeadComment.objects.select_related("lead", "author").all().order_by("-is_pinned", "-created_at")
+    serializer_class = LeadCommentSerializer
+    permission_classes = [IsAuthenticated, RBACPermission]
+    action_perms = {
+        "list": (Perm.LEADS_READ,),
+        "retrieve": (Perm.LEADS_READ,),
+        "create": (Perm.LEADS_WRITE,),
+        "update": (Perm.LEADS_WRITE,),
+        "partial_update": (Perm.LEADS_WRITE,),
+        "destroy": (Perm.LEADS_WRITE,),
+    }
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = LeadCommentFilter
+
+    def _assert_write_allowed(self, instance: LeadComment):
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.SUPERUSER, UserRole.ADMIN, UserRole.TEAMLEADER}:
+            return
+        if instance.author_id != self.request.user.id:
+            raise PermissionDenied("You can modify only your own comments")
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+    def perform_update(self, serializer):
+        self._assert_write_allowed(serializer.instance)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._assert_write_allowed(instance)
+        instance.delete()
 
 
 class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):

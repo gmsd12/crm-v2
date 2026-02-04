@@ -79,8 +79,8 @@ class LeadAdmin(admin.ModelAdmin):
 
 @admin.register(LeadComment)
 class LeadCommentAdmin(admin.ModelAdmin):
-    list_display = ("id", "lead", "author", "created_at")
-    list_filter = ("created_at",)
+    list_display = ("id", "lead", "author", "is_pinned", "created_at")
+    list_filter = ("is_pinned", "created_at")
     search_fields = ("lead__external_id", "author__username", "body")
     ordering = ("-created_at",)
     readonly_fields = ("created_at", "updated_at")
