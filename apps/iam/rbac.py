@@ -20,6 +20,7 @@ class Perm:
     # Leads (пример на будущее)
     LEADS_READ = "leads.read"
     LEADS_WRITE = "leads.write"
+    LEADS_HARD_DELETE = "leads.hard_delete"
     LEADS_STATUS_WRITE = "leads.status.write"
     LEADS_ASSIGN_MANAGER = "leads.assign_manager"
 
@@ -33,7 +34,7 @@ ROLE_PERMS: dict[str, set[str]] = {
     UserRole.SUPERUSER: {
         Perm.IAM_USERS_READ, Perm.IAM_USERS_WRITE, Perm.IAM_USERS_HARD_DELETE,
         Perm.BRANDS_READ, Perm.BRANDS_WRITE,
-        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_HARD_DELETE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
         Perm.LEAD_STATUSES_READ, Perm.LEAD_STATUSES_WRITE, Perm.LEAD_STATUSES_HARD_DELETE,
     },
     UserRole.ADMIN: {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework import serializers
 
 from apps.iam.models import UserRole
@@ -167,6 +168,92 @@ class LeadSerializer(serializers.ModelSerializer):
         if not obj.duplicate_of_id:
             return None
         return str(obj.duplicate_of_id)
+
+
+class LeadWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lead
+        fields = [
+            "id",
+            "partner",
+            "source",
+            "external_id",
+            "full_name",
+            "phone",
+            "email",
+            "priority",
+            "next_contact_at",
+            "last_contacted_at",
+            "expected_revenue",
+            "currency",
+            "product",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_content",
+            "utm_term",
+            "is_duplicate",
+            "duplicate_of",
+            "custom_fields",
+        ]
+        read_only_fields = ["id"]
+        extra_kwargs = {
+            "partner": {"required": True},
+            "source": {"required": False, "allow_null": True},
+            "external_id": {"required": False, "allow_null": True, "allow_blank": True},
+            "full_name": {"required": False, "allow_blank": True},
+            "phone": {"required": False, "allow_blank": True},
+            "email": {"required": False, "allow_blank": True},
+            "currency": {"required": False, "allow_blank": False},
+            "product": {"required": False, "allow_blank": True},
+            "utm_source": {"required": False, "allow_blank": True},
+            "utm_medium": {"required": False, "allow_blank": True},
+            "utm_campaign": {"required": False, "allow_blank": True},
+            "utm_content": {"required": False, "allow_blank": True},
+            "utm_term": {"required": False, "allow_blank": True},
+        }
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+        is_create = instance is None
+
+        partner = attrs.get("partner") or getattr(instance, "partner", None)
+        if not partner:
+            raise serializers.ValidationError({"partner": "This field is required"})
+
+        phone = (attrs.get("phone") if "phone" in attrs else getattr(instance, "phone", "")) or ""
+        email = (attrs.get("email") if "email" in attrs else getattr(instance, "email", "")) or ""
+        phone = phone.strip()
+        email = email.strip().lower()
+        if not phone and not email:
+            raise serializers.ValidationError({"phone": "Either phone or email is required"})
+
+        attrs["phone"] = phone
+        attrs["email"] = email
+        attrs["full_name"] = ((attrs.get("full_name") if "full_name" in attrs else getattr(instance, "full_name", "")) or "").strip()
+        attrs["product"] = ((attrs.get("product") if "product" in attrs else getattr(instance, "product", "")) or "").strip()
+        if "currency" in attrs:
+            attrs["currency"] = (attrs.get("currency") or "USD").upper()
+
+        duplicate_of = attrs.get("duplicate_of", getattr(instance, "duplicate_of", None))
+        if duplicate_of and instance and duplicate_of.id == instance.id:
+            raise serializers.ValidationError({"duplicate_of": "Lead cannot be duplicate of itself"})
+        if duplicate_of and duplicate_of.partner_id != partner.id:
+            raise serializers.ValidationError({"duplicate_of": "duplicate_of must belong to same partner"})
+
+        duplicate_qs = Lead.objects.filter(partner=partner)
+        if instance:
+            duplicate_qs = duplicate_qs.exclude(id=instance.id)
+        duplicate_match = duplicate_qs.filter(Q(phone=phone) | Q(email__iexact=email)).order_by("received_at").first()
+        if duplicate_match and not duplicate_of:
+            attrs["is_duplicate"] = True
+            attrs["duplicate_of"] = duplicate_match
+        elif duplicate_of and "is_duplicate" not in attrs:
+            attrs["is_duplicate"] = True
+        elif not duplicate_match and "is_duplicate" not in attrs and is_create:
+            attrs["is_duplicate"] = False
+
+        return attrs
 
 
 class LeadStatusChangeSerializer(serializers.Serializer):

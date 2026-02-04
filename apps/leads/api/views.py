@@ -43,6 +43,7 @@ from .serializers import (
     BulkLeadStatusChangeSerializer,
     LeadAssignManagerSerializer,
     LeadFunnelMetricsQuerySerializer,
+    LeadWriteSerializer,
     LeadCommentSerializer,
     LeadSerializer,
     LeadStatusChangeSerializer,
@@ -412,13 +413,19 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         instance.delete()
 
 
-class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
+class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     queryset = Lead.objects.select_related("partner", "manager", "source", "pipeline", "status").all().order_by("-received_at")
     serializer_class = LeadSerializer
     permission_classes = [IsAuthenticated, RBACPermission]
     action_perms = {
         "list": (Perm.LEADS_READ,),
         "retrieve": (Perm.LEADS_READ,),
+        "create": (Perm.LEADS_WRITE,),
+        "update": (Perm.LEADS_WRITE,),
+        "partial_update": (Perm.LEADS_WRITE,),
+        "soft_delete": (Perm.LEADS_WRITE,),
+        "restore": (Perm.LEADS_WRITE,),
+        "destroy": (Perm.LEADS_HARD_DELETE,),
         "metrics": (Perm.LEADS_READ,),
         "assign_manager": (Perm.LEADS_ASSIGN_MANAGER,),
         "bulk_assign_manager": (Perm.LEADS_ASSIGN_MANAGER,),
@@ -440,6 +447,58 @@ class LeadViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
         "priority",
         "is_duplicate",
     ]
+
+    def get_serializer_class(self):
+        if self.action in {"create", "update", "partial_update"}:
+            return LeadWriteSerializer
+        return LeadSerializer
+
+    def _assert_can_create(self):
+        role = getattr(self.request.user, "role", None)
+        if role not in {UserRole.SUPERUSER, UserRole.ADMIN}:
+            raise PermissionDenied("Only admins and superusers can create leads")
+
+    def _assert_can_edit(self, lead: Lead):
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.MANAGER, UserRole.RET} and lead.manager_id != self.request.user.id:
+            raise PermissionDenied("You can edit only your own leads")
+
+    def create(self, request, *args, **kwargs):
+        self._assert_can_create()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lead = serializer.save()
+        return Response(LeadSerializer(lead).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        lead = self.get_object()
+        self._assert_can_edit(lead)
+        serializer = self.get_serializer(lead, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        lead = serializer.save()
+        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+    def perform_destroy(self, instance):
+        instance.hard_delete()
+
+    @action(detail=True, methods=["post"])
+    def soft_delete(self, request, pk=None):
+        lead = self.get_object()
+        self._assert_can_edit(lead)
+        lead.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        lead = Lead.all_objects.select_related("manager").get(id=pk)
+        self._assert_can_edit(lead)
+        lead.restore()
+        return Response(status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):

@@ -2029,3 +2029,117 @@ class LeadStatusCatalogApiTests(APITestCase):
         returned_ids = {row["id"] for row in response.data}
         self.assertEqual(len(response.data), 2)
         self.assertNotIn(excluded.id, returned_ids)
+
+    def test_admin_can_create_lead(self):
+        admin = User.objects.create_user(username="admin_lead_create", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Lead Create", code="partner-lead-create")
+        self._auth(admin)
+
+        response = self.client.post(
+            "/api/v1/leads/records/",
+            {
+                "partner": str(partner.id),
+                "full_name": "John Lead",
+                "email": "john.lead@example.com",
+                "currency": "usd",
+                "custom_fields": {"note": "new lead"},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["partner"]["id"], str(partner.id))
+        self.assertEqual(response.data["email"], "john.lead@example.com")
+        self.assertEqual(response.data["currency"], "USD")
+
+    def test_teamleader_cannot_create_lead(self):
+        teamleader = User.objects.create_user(username="tl_lead_create", password="pass12345", role=UserRole.TEAMLEADER)
+        partner = Partner.objects.create(name="Partner Lead Create Deny", code="partner-lead-create-deny")
+        self._auth(teamleader)
+
+        response = self.client.post(
+            "/api/v1/leads/records/",
+            {
+                "partner": str(partner.id),
+                "full_name": "Denied",
+                "phone": "+123456789",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "permission_denied")
+
+    def test_manager_can_update_only_own_lead(self):
+        manager = User.objects.create_user(username="manager_lead_edit_own", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Lead Edit", code="partner-lead-edit")
+        lead = Lead.objects.create(partner=partner, manager=manager, full_name="Before", phone="+111", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.patch(
+            f"/api/v1/leads/records/{lead.id}/",
+            {"full_name": "After"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.full_name, "After")
+
+    def test_manager_cannot_update_foreign_lead(self):
+        owner = User.objects.create_user(username="manager_lead_owner", password="pass12345", role=UserRole.MANAGER)
+        manager = User.objects.create_user(username="manager_lead_other", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Lead Edit Deny", code="partner-lead-edit-deny")
+        lead = Lead.objects.create(partner=partner, manager=owner, full_name="Before", phone="+111", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.patch(
+            f"/api/v1/leads/records/{lead.id}/",
+            {"full_name": "After"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        lead.refresh_from_db()
+        self.assertEqual(lead.full_name, "Before")
+
+    def test_admin_can_soft_delete_lead(self):
+        admin = User.objects.create_user(username="admin_lead_soft_delete", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Lead Soft Delete", code="partner-lead-soft-delete")
+        lead = Lead.objects.create(partner=partner, phone="+111", custom_fields={})
+        self._auth(admin)
+
+        response = self.client.post(f"/api/v1/leads/records/{lead.id}/soft_delete/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Lead.objects.filter(id=lead.id).exists())
+        self.assertTrue(Lead.all_objects.filter(id=lead.id).exists())
+
+    def test_admin_cannot_hard_delete_lead(self):
+        admin = User.objects.create_user(username="admin_lead_hard_delete", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Lead Hard Delete", code="partner-lead-hard-delete")
+        lead = Lead.objects.create(partner=partner, phone="+111", custom_fields={})
+        self._auth(admin)
+
+        response = self.client.delete(f"/api/v1/leads/records/{lead.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Lead.all_objects.filter(id=lead.id).exists())
+
+    def test_superuser_can_hard_delete_lead(self):
+        superuser = User.objects.create_user(
+            username="su_lead_hard_delete",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        partner = Partner.objects.create(name="Partner Lead Hard Delete SU", code="partner-lead-hard-delete-su")
+        lead = Lead.objects.create(partner=partner, phone="+111", custom_fields={})
+        self._auth(superuser)
+
+        response = self.client.delete(f"/api/v1/leads/records/{lead.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Lead.all_objects.filter(id=lead.id).exists())
