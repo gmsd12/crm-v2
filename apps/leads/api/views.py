@@ -45,8 +45,6 @@ from .serializers import (
     LeadFunnelMetricsQuerySerializer,
     LeadWriteSerializer,
     LeadCommentSerializer,
-    LeadMarkDuplicateSerializer,
-    LeadMergeDuplicateSerializer,
     LeadSerializer,
     LeadStatusChangeSerializer,
     LeadStatusAuditLogSerializer,
@@ -435,9 +433,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "bulk_unassign_manager": (Perm.LEADS_ASSIGN_MANAGER,),
         "change_status": (Perm.LEADS_STATUS_WRITE,),
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
-        "duplicate_candidates": (Perm.LEADS_READ,),
-        "mark_duplicate": (Perm.LEADS_WRITE,),
-        "merge_into": (Perm.LEADS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend]
     filterset_fields = [
@@ -504,116 +499,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         self._assert_can_edit(lead)
         lead.restore()
         return Response(status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["get"], url_path="duplicate-candidates")
-    def duplicate_candidates(self, request, pk=None):
-        lead = self.get_object()
-        self._assert_can_edit(lead)
-        phone = (lead.phone or "").strip()
-        email = (lead.email or "").strip()
-        if not phone and not email:
-            return Response({"results": []}, status=status.HTTP_200_OK)
-
-        qs = Lead.objects.filter(partner_id=lead.partner_id).exclude(id=lead.id)
-        contact_filter = Q()
-        if phone:
-            contact_filter |= Q(phone=phone)
-        if email:
-            contact_filter |= Q(email__iexact=email)
-        duplicates = list(
-            qs.filter(contact_filter)
-            .select_related("partner", "manager", "source", "pipeline", "status")
-            .order_by("-received_at")
-        )
-        return Response({"results": LeadSerializer(duplicates, many=True).data}, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["post"], url_path="mark-duplicate")
-    def mark_duplicate(self, request, pk=None):
-        serializer = LeadMarkDuplicateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        with transaction.atomic():
-            lead = Lead.objects.select_for_update().get(id=pk)
-            self._assert_can_edit(lead)
-            master = Lead.objects.select_for_update().get(id=serializer.validated_data["master_lead"].id)
-            self._assert_can_edit(master)
-            if master.id == lead.id:
-                raise serializers.ValidationError({"master_lead": "Lead cannot be duplicate of itself"})
-            if master.partner_id != lead.partner_id:
-                raise serializers.ValidationError({"master_lead": "master_lead must belong to same partner"})
-
-            lead.is_duplicate = True
-            lead.duplicate_of = master
-            lead.save(update_fields=["is_duplicate", "duplicate_of", "updated_at"])
-
-        lead.refresh_from_db()
-        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["post"], url_path="merge-into")
-    def merge_into(self, request, pk=None):
-        serializer = LeadMergeDuplicateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        delete_source = serializer.validated_data.get("delete_source", True)
-
-        with transaction.atomic():
-            source = Lead.objects.select_for_update().get(id=pk)
-            self._assert_can_edit(source)
-            master = Lead.objects.select_for_update().get(id=serializer.validated_data["master_lead"].id)
-            self._assert_can_edit(master)
-            if master.id == source.id:
-                raise serializers.ValidationError({"master_lead": "master_lead must be different from source lead"})
-            if master.partner_id != source.partner_id:
-                raise serializers.ValidationError({"master_lead": "master_lead must belong to same partner"})
-
-            if not master.phone and source.phone:
-                master.phone = source.phone
-            if not master.email and source.email:
-                master.email = source.email
-            if not master.full_name and source.full_name:
-                master.full_name = source.full_name
-            if not master.product and source.product:
-                master.product = source.product
-            if master.expected_revenue is None and source.expected_revenue is not None:
-                master.expected_revenue = source.expected_revenue
-            if not master.next_contact_at and source.next_contact_at:
-                master.next_contact_at = source.next_contact_at
-            if not master.last_contacted_at and source.last_contacted_at:
-                master.last_contacted_at = source.last_contacted_at
-            master.priority = max(master.priority, source.priority)
-            master.custom_fields = {**(source.custom_fields or {}), **(master.custom_fields or {})}
-            master.save(
-                update_fields=[
-                    "phone",
-                    "email",
-                    "full_name",
-                    "product",
-                    "expected_revenue",
-                    "next_contact_at",
-                    "last_contacted_at",
-                    "priority",
-                    "custom_fields",
-                    "updated_at",
-                ]
-            )
-
-            LeadComment.objects.filter(lead_id=source.id).update(lead=master)
-
-            source.is_duplicate = True
-            source.duplicate_of = master
-            source.save(update_fields=["is_duplicate", "duplicate_of", "updated_at"])
-            if delete_source:
-                source.delete()
-
-        master.refresh_from_db()
-        source.refresh_from_db()
-        return Response(
-            {
-                "master": LeadSerializer(master).data,
-                "source": LeadSerializer(source).data,
-                "source_deleted": bool(source.is_deleted),
-            },
-            status=status.HTTP_200_OK,
-        )
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):

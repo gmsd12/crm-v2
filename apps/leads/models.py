@@ -196,6 +196,28 @@ class LeadComment(models.Model):
         return f"LeadComment {self.pk} lead={self.lead_id}"
 
 
+class LeadDuplicateAttempt(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    partner = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name="lead_duplicate_attempts")
+    source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="lead_duplicate_attempts")
+    existing_lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="duplicate_attempts")
+    external_id = models.CharField(max_length=128, blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    full_name = models.CharField(max_length=255, blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "lead_duplicate_attempts"
+        indexes = [
+            models.Index(fields=["partner", "phone", "created_at"]),
+            models.Index(fields=["existing_lead", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"LeadDuplicateAttempt {self.pk} partner={self.partner_id} phone={self.phone}"
+
+
 class LeadStatusAuditEvent(models.TextChoices):
     STATUS_CHANGED = "status_changed", "Status Changed"
     STATUS_CREATED = "status_created", "Status Created"

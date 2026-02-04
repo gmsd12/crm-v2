@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     Lead,
     LeadComment,
+    LeadDuplicateAttempt,
     LeadStatus,
     LeadStatusAuditLog,
     LeadStatusIdempotencyKey,
@@ -84,6 +85,15 @@ class LeadCommentAdmin(admin.ModelAdmin):
     search_fields = ("lead__external_id", "author__username", "body")
     ordering = ("-created_at",)
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(LeadDuplicateAttempt)
+class LeadDuplicateAttemptAdmin(admin.ModelAdmin):
+    list_display = ("id", "partner", "source", "existing_lead", "phone", "external_id", "created_at")
+    list_filter = ("partner", "source", "created_at")
+    search_fields = ("phone", "external_id", "full_name", "partner__code", "partner__name")
+    ordering = ("-created_at",)
+    readonly_fields = ("created_at",)
 
 
 @admin.register(LeadStatusAuditLog)

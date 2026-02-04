@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db.models import Q
 from rest_framework import serializers
 
 from apps.iam.models import UserRole
@@ -192,8 +191,6 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "utm_campaign",
             "utm_content",
             "utm_term",
-            "is_duplicate",
-            "duplicate_of",
             "custom_fields",
         ]
         read_only_fields = ["id"]
@@ -235,23 +232,14 @@ class LeadWriteSerializer(serializers.ModelSerializer):
         if "currency" in attrs:
             attrs["currency"] = (attrs.get("currency") or "USD").upper()
 
-        duplicate_of = attrs.get("duplicate_of", getattr(instance, "duplicate_of", None))
-        if duplicate_of and instance and duplicate_of.id == instance.id:
-            raise serializers.ValidationError({"duplicate_of": "Lead cannot be duplicate of itself"})
-        if duplicate_of and duplicate_of.partner_id != partner.id:
-            raise serializers.ValidationError({"duplicate_of": "duplicate_of must belong to same partner"})
-
         duplicate_qs = Lead.objects.filter(partner=partner)
         if instance:
             duplicate_qs = duplicate_qs.exclude(id=instance.id)
-        duplicate_match = duplicate_qs.filter(Q(phone=phone) | Q(email__iexact=email)).order_by("received_at").first()
-        if duplicate_match and not duplicate_of:
-            attrs["is_duplicate"] = True
-            attrs["duplicate_of"] = duplicate_match
-        elif duplicate_of and "is_duplicate" not in attrs:
-            attrs["is_duplicate"] = True
-        elif not duplicate_match and "is_duplicate" not in attrs and is_create:
+        if phone and duplicate_qs.filter(phone=phone).exists():
+            raise serializers.ValidationError({"phone": "Duplicate phone for this partner"})
+        if is_create and "is_duplicate" not in attrs:
             attrs["is_duplicate"] = False
+            attrs["duplicate_of"] = None
 
         return attrs
 
@@ -382,25 +370,6 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         date_to = attrs.get("date_to")
         if date_from and date_to and date_from > date_to:
             raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
-        return attrs
-
-
-class LeadMarkDuplicateSerializer(serializers.Serializer):
-    master_lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all())
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
-
-    def validate(self, attrs):
-        attrs["reason"] = (attrs.get("reason") or "").strip()
-        return attrs
-
-
-class LeadMergeDuplicateSerializer(serializers.Serializer):
-    master_lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all())
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
-    delete_source = serializers.BooleanField(required=False, default=True)
-
-    def validate(self, attrs):
-        attrs["reason"] = (attrs.get("reason") or "").strip()
         return attrs
 
 

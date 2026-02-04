@@ -79,8 +79,10 @@ class PartnerLeadViewSet(
         lead = serializer.save()
 
         created = getattr(lead, "_was_created", True)
+        duplicate_rejected = getattr(lead, "_duplicate_rejected", False)
 
         out = LeadListSerializer(lead).data
         out["created"] = created
+        out["duplicate_rejected"] = duplicate_rejected
 
         return Response(out, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

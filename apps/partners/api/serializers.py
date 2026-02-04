@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 from apps.partners.models import PartnerSource
-from apps.leads.models import Lead, LeadStatus
+from apps.leads.models import Lead, LeadDuplicateAttempt, LeadStatus
 from django.db import transaction, IntegrityError
 
 
@@ -93,6 +93,24 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             .first()
         )
         pipeline = default_status.pipeline if default_status else None
+        phone = (validated_data.get("phone") or "").strip()
+
+        # дубли учитываем только по телефону: не создаём лид, а записываем попытку
+        if phone:
+            duplicate_lead = Lead.objects.filter(partner=partner, phone=phone).order_by("received_at").first()
+            if duplicate_lead:
+                LeadDuplicateAttempt.objects.create(
+                    partner=partner,
+                    source=source,
+                    existing_lead=duplicate_lead,
+                    external_id=validated_data.get("external_id") or "",
+                    phone=phone,
+                    full_name=validated_data.get("full_name") or "",
+                    payload=validated_data,
+                )
+                duplicate_lead._was_created = False
+                duplicate_lead._duplicate_rejected = True
+                return duplicate_lead
 
         # Нет external_id => всегда новый лид
         if not external_id:
@@ -110,6 +128,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         existing = Lead.objects.filter(partner=partner, external_id=external_id).first()
         if existing:
             existing._was_created = False
+            existing._duplicate_rejected = False
             return existing
 
         try:
@@ -122,11 +141,13 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     **validated_data,
                 )
                 lead._was_created = True
+                lead._duplicate_rejected = False
                 return lead
         except IntegrityError:
             # параллельный create — просто читаем
             lead = Lead.objects.get(partner=partner, external_id=external_id)
             lead._was_created = False
+            lead._duplicate_rejected = False
             return lead
 
 
