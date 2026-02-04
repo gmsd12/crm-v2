@@ -385,6 +385,25 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         return attrs
 
 
+class LeadMarkDuplicateSerializer(serializers.Serializer):
+    master_lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all())
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
+class LeadMergeDuplicateSerializer(serializers.Serializer):
+    master_lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all())
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    delete_source = serializers.BooleanField(required=False, default=True)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
 class LeadCommentSerializer(serializers.ModelSerializer):
     author_username = serializers.CharField(source="author.username", read_only=True)
 

@@ -2143,3 +2143,96 @@ class LeadStatusCatalogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Lead.all_objects.filter(id=lead.id).exists())
+
+    def test_admin_create_auto_marks_duplicate_by_email(self):
+        admin = User.objects.create_user(username="admin_auto_dup", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Auto Dup", code="partner-auto-dup")
+        original = Lead.objects.create(
+            partner=partner,
+            email="dup@example.com",
+            phone="+1111",
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.post(
+            "/api/v1/leads/records/",
+            {
+                "partner": str(partner.id),
+                "email": "dup@example.com",
+                "phone": "+2222",
+                "full_name": "Duplicate lead",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["is_duplicate"])
+        self.assertEqual(response.data["duplicate_of"], str(original.id))
+
+    def test_duplicate_candidates_returns_matches_by_phone_or_email(self):
+        admin = User.objects.create_user(username="admin_dup_candidates", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Dup Candidates", code="partner-dup-candidates")
+        main = Lead.objects.create(partner=partner, phone="+123", email="one@example.com", custom_fields={})
+        same_phone = Lead.objects.create(partner=partner, phone="+123", email="two@example.com", custom_fields={})
+        same_email = Lead.objects.create(partner=partner, phone="+999", email="one@example.com", custom_fields={})
+        self._auth(admin)
+
+        response = self.client.get(f"/api/v1/leads/records/{main.id}/duplicate-candidates/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {item["id"] for item in response.data["results"]}
+        self.assertIn(str(same_phone.id), returned_ids)
+        self.assertIn(str(same_email.id), returned_ids)
+
+    def test_admin_can_mark_lead_duplicate_of_master(self):
+        admin = User.objects.create_user(username="admin_mark_dup", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Mark Dup", code="partner-mark-dup")
+        master = Lead.objects.create(partner=partner, phone="+111", custom_fields={})
+        duplicate = Lead.objects.create(partner=partner, phone="+222", custom_fields={})
+        self._auth(admin)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{duplicate.id}/mark-duplicate/",
+            {"master_lead": str(master.id)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        duplicate.refresh_from_db()
+        self.assertTrue(duplicate.is_duplicate)
+        self.assertEqual(duplicate.duplicate_of_id, master.id)
+
+    def test_admin_can_merge_duplicate_and_move_comments(self):
+        admin = User.objects.create_user(username="admin_merge_dup", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_merge_dup", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Merge Dup", code="partner-merge-dup")
+        master = Lead.objects.create(partner=partner, phone="+100", full_name="Master", custom_fields={"a": 1})
+        source = Lead.objects.create(
+            partner=partner,
+            phone="+200",
+            email="merge@example.com",
+            full_name="Source",
+            product="Product X",
+            priority=Lead.Priority.HIGH,
+            custom_fields={"b": 2},
+        )
+        comment = LeadComment.objects.create(lead=source, author=manager, body="source comment")
+        self._auth(admin)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{source.id}/merge-into/",
+            {"master_lead": str(master.id), "delete_source": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        master.refresh_from_db()
+        source.refresh_from_db()
+        comment.refresh_from_db()
+        self.assertEqual(master.email, "merge@example.com")
+        self.assertEqual(master.product, "Product X")
+        self.assertEqual(master.priority, Lead.Priority.HIGH)
+        self.assertEqual(comment.lead_id, master.id)
+        self.assertTrue(source.is_deleted)
+        self.assertEqual(source.duplicate_of_id, master.id)
