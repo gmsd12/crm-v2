@@ -2229,3 +2229,31 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(attempt.existing_lead_id, existing.id)
         self.assertEqual(attempt.phone, "+123456")
         self.assertEqual(attempt.email, "duplicate@example.com")
+
+    def test_leads_list_supports_manager_and_status_in_filters(self):
+        admin = User.objects.create_user(username="admin_leads_filter_in", password="pass12345", role=UserRole.ADMIN)
+        manager_a = User.objects.create_user(username="manager_filter_in_a", password="pass12345", role=UserRole.MANAGER)
+        manager_b = User.objects.create_user(username="manager_filter_in_b", password="pass12345", role=UserRole.MANAGER)
+        manager_c = User.objects.create_user(username="manager_filter_in_c", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Filter In", code="partner-filter-in")
+        pipeline = Pipeline.objects.create(code="wf_filter_in", name="Workflow Filter In", is_default=True)
+        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
+
+        lead_a = Lead.objects.create(partner=partner, manager=manager_a, pipeline=pipeline, status=status_new, custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, manager=manager_b, pipeline=pipeline, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=manager_c, pipeline=pipeline, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=manager_a, pipeline=pipeline, status=status_work, custom_fields={})
+        self._auth(admin)
+
+        response = self.client.get(
+            "/api/v1/leads/records/",
+            {
+                "manager__in": f"{manager_a.id},{manager_b.id}",
+                "status__in": str(status_new.id),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        self.assertCountEqual([item["id"] for item in items], [str(lead_a.id), str(lead_b.id)])

@@ -371,6 +371,39 @@ class NumberInFilter(django_filters.BaseInFilter, django_filters.NumberFilter):
     pass
 
 
+class UUIDInFilter(django_filters.BaseInFilter, django_filters.UUIDFilter):
+    pass
+
+
+class LeadRecordFilter(django_filters.FilterSet):
+    partner__in = UUIDInFilter(field_name="partner_id", lookup_expr="in")
+    manager__in = NumberInFilter(field_name="manager_id", lookup_expr="in")
+    source__in = UUIDInFilter(field_name="source_id", lookup_expr="in")
+    pipeline__in = UUIDInFilter(field_name="pipeline_id", lookup_expr="in")
+    status__in = UUIDInFilter(field_name="status_id", lookup_expr="in")
+    priority__in = NumberInFilter(field_name="priority", lookup_expr="in")
+
+    class Meta:
+        model = Lead
+        fields = [
+            "partner",
+            "partner__in",
+            "manager",
+            "manager__in",
+            "source",
+            "source__in",
+            "pipeline",
+            "pipeline__in",
+            "status",
+            "status__in",
+            "external_id",
+            "phone",
+            "email",
+            "priority",
+            "priority__in",
+        ]
+
+
 class LeadCommentFilter(django_filters.FilterSet):
     authors = NumberInFilter(field_name="author_id", lookup_expr="in")
 
@@ -435,17 +468,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = [
-        "partner",
-        "manager",
-        "source",
-        "pipeline",
-        "status",
-        "external_id",
-        "phone",
-        "email",
-        "priority",
-    ]
+    filterset_class = LeadRecordFilter
 
     def get_serializer_class(self):
         if self.action in {"create", "update", "partial_update"}:
