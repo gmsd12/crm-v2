@@ -61,7 +61,7 @@ class LeadAdmin(admin.ModelAdmin):
         "received_at",
         "is_deleted",
     )
-    list_filter = ("partner", "manager", "priority", "pipeline", "status", "source", "is_duplicate", "is_deleted")
+    list_filter = ("partner", "manager", "priority", "pipeline", "status", "source", "is_deleted")
     search_fields = (
         "external_id",
         "full_name",
@@ -89,9 +89,9 @@ class LeadCommentAdmin(admin.ModelAdmin):
 
 @admin.register(LeadDuplicateAttempt)
 class LeadDuplicateAttemptAdmin(admin.ModelAdmin):
-    list_display = ("id", "partner", "source", "existing_lead", "phone", "external_id", "created_at")
+    list_display = ("id", "partner", "source", "existing_lead", "phone", "email", "created_at")
     list_filter = ("partner", "source", "created_at")
-    search_fields = ("phone", "external_id", "full_name", "partner__code", "partner__name")
+    search_fields = ("phone", "email", "full_name", "partner__code", "partner__name")
     ordering = ("-created_at",)
     readonly_fields = ("created_at",)
 

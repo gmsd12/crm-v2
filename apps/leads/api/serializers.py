@@ -107,7 +107,6 @@ class LeadSerializer(serializers.ModelSerializer):
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
-    duplicate_of = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
@@ -129,13 +128,6 @@ class LeadSerializer(serializers.ModelSerializer):
             "expected_revenue",
             "currency",
             "product",
-            "utm_source",
-            "utm_medium",
-            "utm_campaign",
-            "utm_content",
-            "utm_term",
-            "is_duplicate",
-            "duplicate_of",
             "custom_fields",
             "received_at",
         ]
@@ -163,11 +155,6 @@ class LeadSerializer(serializers.ModelSerializer):
             return None
         return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
 
-    def get_duplicate_of(self, obj):
-        if not obj.duplicate_of_id:
-            return None
-        return str(obj.duplicate_of_id)
-
 
 class LeadWriteSerializer(serializers.ModelSerializer):
     class Meta:
@@ -186,11 +173,6 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "expected_revenue",
             "currency",
             "product",
-            "utm_source",
-            "utm_medium",
-            "utm_campaign",
-            "utm_content",
-            "utm_term",
             "custom_fields",
         ]
         read_only_fields = ["id"]
@@ -203,16 +185,10 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "email": {"required": False, "allow_blank": True},
             "currency": {"required": False, "allow_blank": False},
             "product": {"required": False, "allow_blank": True},
-            "utm_source": {"required": False, "allow_blank": True},
-            "utm_medium": {"required": False, "allow_blank": True},
-            "utm_campaign": {"required": False, "allow_blank": True},
-            "utm_content": {"required": False, "allow_blank": True},
-            "utm_term": {"required": False, "allow_blank": True},
         }
 
     def validate(self, attrs):
         instance = getattr(self, "instance", None)
-        is_create = instance is None
 
         partner = attrs.get("partner") or getattr(instance, "partner", None)
         if not partner:
@@ -237,9 +213,6 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             duplicate_qs = duplicate_qs.exclude(id=instance.id)
         if phone and duplicate_qs.filter(phone=phone).exists():
             raise serializers.ValidationError({"phone": "Duplicate phone for this partner"})
-        if is_create and "is_duplicate" not in attrs:
-            attrs["is_duplicate"] = False
-            attrs["duplicate_of"] = None
 
         return attrs
 

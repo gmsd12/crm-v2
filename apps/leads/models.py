@@ -126,19 +126,6 @@ class Lead(BaseModel):
     expected_revenue = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=3, default="USD")
     product = models.CharField(max_length=255, blank=True, default="")
-    utm_source = models.CharField(max_length=255, blank=True, default="")
-    utm_medium = models.CharField(max_length=255, blank=True, default="")
-    utm_campaign = models.CharField(max_length=255, blank=True, default="")
-    utm_content = models.CharField(max_length=255, blank=True, default="")
-    utm_term = models.CharField(max_length=255, blank=True, default="")
-    is_duplicate = models.BooleanField(default=False)
-    duplicate_of = models.ForeignKey(
-        "self",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="duplicate_leads",
-    )
     custom_fields = models.JSONField(default=dict, blank=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -201,10 +188,9 @@ class LeadDuplicateAttempt(models.Model):
     partner = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name="lead_duplicate_attempts")
     source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="lead_duplicate_attempts")
     existing_lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="duplicate_attempts")
-    external_id = models.CharField(max_length=128, blank=True, default="")
-    phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    phone = models.CharField(max_length=32, db_index=True)
     full_name = models.CharField(max_length=255, blank=True, default="")
-    payload = models.JSONField(default=dict, blank=True)
+    email = models.EmailField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:

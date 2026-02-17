@@ -29,11 +29,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             "expected_revenue",
             "currency",
             "product",
-            "utm_source",
-            "utm_medium",
-            "utm_campaign",
-            "utm_content",
-            "utm_term",
             "custom_fields",
             "received_at",
         ]
@@ -70,11 +65,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         attrs["full_name"] = (attrs.get("full_name") or "").strip()
         attrs["product"] = (attrs.get("product") or "").strip()
         attrs["currency"] = (attrs.get("currency") or "USD").upper()
-        attrs["utm_source"] = (attrs.get("utm_source") or "").strip()
-        attrs["utm_medium"] = (attrs.get("utm_medium") or "").strip()
-        attrs["utm_campaign"] = (attrs.get("utm_campaign") or "").strip()
-        attrs["utm_content"] = (attrs.get("utm_content") or "").strip()
-        attrs["utm_term"] = (attrs.get("utm_term") or "").strip()
         return attrs
 
     def create(self, validated_data):
@@ -103,10 +93,9 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     partner=partner,
                     source=source,
                     existing_lead=duplicate_lead,
-                    external_id=validated_data.get("external_id") or "",
                     phone=phone,
                     full_name=validated_data.get("full_name") or "",
-                    payload=validated_data,
+                    email=validated_data.get("email") or "",
                 )
                 duplicate_lead._was_created = False
                 duplicate_lead._duplicate_rejected = True
@@ -171,11 +160,6 @@ class LeadListSerializer(serializers.ModelSerializer):
             "expected_revenue",
             "currency",
             "product",
-            "utm_source",
-            "utm_medium",
-            "utm_campaign",
-            "utm_content",
-            "utm_term",
             "custom_fields",
             "received_at",
         ]

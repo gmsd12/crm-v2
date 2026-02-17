@@ -2212,6 +2212,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             "/api/v1/partner/leads/",
             {
                 "phone": "+123456",
+                "email": "duplicate@example.com",
                 "full_name": "Duplicate try",
                 "external_id": "dup-ext-1",
                 "custom_fields": {"x": 1},
@@ -2227,3 +2228,4 @@ class LeadStatusCatalogApiTests(APITestCase):
         attempt = LeadDuplicateAttempt.objects.get(partner=partner)
         self.assertEqual(attempt.existing_lead_id, existing.id)
         self.assertEqual(attempt.phone, "+123456")
+        self.assertEqual(attempt.email, "duplicate@example.com")

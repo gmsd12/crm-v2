@@ -445,7 +445,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "phone",
         "email",
         "priority",
-        "is_duplicate",
     ]
 
     def get_serializer_class(self):
