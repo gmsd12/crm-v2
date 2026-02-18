@@ -29,6 +29,16 @@ Backend for CRM v2 with:
 - Run focused suites:
   - `./.venv/bin/python manage.py test apps.core apps.iam apps.partners`
 
+## Demo data
+
+- Seed readable demo dataset (partner, pipeline, statuses, users, leads, comments):
+  - `./.venv/bin/python manage.py seed_demo_crm`
+- Top up only leads/comments at any time:
+  - `./.venv/bin/python manage.py seed_demo_crm --leads 25 --comments 0`
+  - `./.venv/bin/python manage.py seed_demo_crm --leads 0 --comments 60`
+- Change demo users password:
+  - `./.venv/bin/python manage.py seed_demo_crm --password newpass123`
+
 ## Operational notes
 
 - Partner lead list endpoint uses pagination (`page`, `page_size`).

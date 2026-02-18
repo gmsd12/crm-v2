@@ -24,6 +24,8 @@ env = environ.Env(
     PARTNER_API_THROTTLE_RATE=(str, "120/min"),
     PARTNER_LEADS_PAGE_SIZE=(int, 50),
     PARTNER_LEADS_MAX_PAGE_SIZE=(int, 200),
+    API_PAGE_SIZE=(int, 50),
+    API_MAX_PAGE_SIZE=(int, 200),
     LEADS_BULK_STATUS_CHANGE_MAX_IDS=(int, 500),
 )
 environ.Env.read_env(BASE_DIR / ".env")
@@ -126,6 +128,8 @@ STATIC_URL = 'static/'
 PARTNER_API_THROTTLE_RATE = env("PARTNER_API_THROTTLE_RATE", default="120/min")
 PARTNER_LEADS_PAGE_SIZE = env.int("PARTNER_LEADS_PAGE_SIZE", default=50)
 PARTNER_LEADS_MAX_PAGE_SIZE = env.int("PARTNER_LEADS_MAX_PAGE_SIZE", default=200)
+API_PAGE_SIZE = env.int("API_PAGE_SIZE", default=50)
+API_MAX_PAGE_SIZE = env.int("API_MAX_PAGE_SIZE", default=200)
 LEADS_BULK_STATUS_CHANGE_MAX_IDS = env.int("LEADS_BULK_STATUS_CHANGE_MAX_IDS", default=500)
 
 # DRF
@@ -135,6 +139,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.DefaultPageNumberPagination",
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
     ),

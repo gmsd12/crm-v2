@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import re
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.iam.models import UserRole
 from apps.leads.models import (
+    LeadAuditLog,
     Lead,
     LeadComment,
     LeadStatus,
-    LeadStatusAuditLog,
     LeadStatusTransition,
     Pipeline,
 )
@@ -17,6 +20,7 @@ from apps.partners.models import Partner
 
 User = get_user_model()
 ASSIGNEE_ROLES = (UserRole.MANAGER, UserRole.RET)
+GEO_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 
 class PipelineSerializer(serializers.ModelSerializer):
@@ -40,6 +44,7 @@ class LeadStatusSerializer(serializers.ModelSerializer):
             "is_active",
             "is_terminal",
             "counts_for_conversion",
+            "conversion_bucket",
             "created_at",
             "updated_at",
         ]
@@ -81,10 +86,12 @@ class LeadStatusAuditLogSerializer(serializers.ModelSerializer):
     to_status_code = serializers.CharField(source="to_status.code", read_only=True)
 
     class Meta:
-        model = LeadStatusAuditLog
+        model = LeadAuditLog
         fields = [
             "id",
             "lead",
+            "entity_type",
+            "entity_id",
             "event_type",
             "from_status",
             "from_status_code",
@@ -94,6 +101,7 @@ class LeadStatusAuditLogSerializer(serializers.ModelSerializer):
             "actor_username",
             "source",
             "reason",
+            "batch_id",
             "payload_before",
             "payload_after",
             "created_at",
@@ -106,6 +114,8 @@ class LeadSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
+    first_manager = serializers.SerializerMethodField()
+    won_by_manager = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
 
     class Meta:
@@ -113,8 +123,11 @@ class LeadSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "external_id",
+            "geo",
             "partner",
             "manager",
+            "first_manager",
+            "won_by_manager",
             "source",
             "pipeline",
             "status",
@@ -125,9 +138,9 @@ class LeadSerializer(serializers.ModelSerializer):
             "next_contact_at",
             "last_contacted_at",
             "assigned_at",
-            "expected_revenue",
-            "currency",
-            "product",
+            "first_assigned_at",
+            "won_at",
+            "sales_closed",
             "custom_fields",
             "received_at",
         ]
@@ -150,6 +163,16 @@ class LeadSerializer(serializers.ModelSerializer):
             return None
         return {"id": str(obj.manager_id), "username": obj.manager.username}
 
+    def get_first_manager(self, obj):
+        if not obj.first_manager_id:
+            return None
+        return {"id": str(obj.first_manager_id), "username": obj.first_manager.username}
+
+    def get_won_by_manager(self, obj):
+        if not obj.won_by_manager_id:
+            return None
+        return {"id": str(obj.won_by_manager_id), "username": obj.won_by_manager.username}
+
     def get_source(self, obj):
         if not obj.source_id:
             return None
@@ -164,15 +187,13 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "partner",
             "source",
             "external_id",
+            "geo",
             "full_name",
             "phone",
             "email",
             "priority",
             "next_contact_at",
             "last_contacted_at",
-            "expected_revenue",
-            "currency",
-            "product",
             "custom_fields",
         ]
         read_only_fields = ["id"]
@@ -180,11 +201,10 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "partner": {"required": True},
             "source": {"required": False, "allow_null": True},
             "external_id": {"required": False, "allow_null": True, "allow_blank": True},
+            "geo": {"required": False, "allow_blank": True},
             "full_name": {"required": False, "allow_blank": True},
             "phone": {"required": False, "allow_blank": True},
             "email": {"required": False, "allow_blank": True},
-            "currency": {"required": False, "allow_blank": False},
-            "product": {"required": False, "allow_blank": True},
         }
 
     def validate(self, attrs):
@@ -203,10 +223,16 @@ class LeadWriteSerializer(serializers.ModelSerializer):
 
         attrs["phone"] = phone
         attrs["email"] = email
+        geo = (attrs.get("geo") if "geo" in attrs else getattr(instance, "geo", "")) or ""
+        geo = geo.strip().upper()
+        if geo and not GEO_CODE_RE.fullmatch(geo):
+            raise serializers.ValidationError({"geo": "geo must be a 2-letter uppercase country code"})
+        attrs["geo"] = geo
         attrs["full_name"] = ((attrs.get("full_name") if "full_name" in attrs else getattr(instance, "full_name", "")) or "").strip()
-        attrs["product"] = ((attrs.get("product") if "product" in attrs else getattr(instance, "product", "")) or "").strip()
-        if "currency" in attrs:
-            attrs["currency"] = (attrs.get("currency") or "USD").upper()
+        if "next_contact_at" in attrs and attrs["next_contact_at"] is not None:
+            next_contact_at = attrs["next_contact_at"]
+            if timezone.is_naive(next_contact_at):
+                attrs["next_contact_at"] = timezone.make_aware(next_contact_at, timezone.get_current_timezone())
 
         duplicate_qs = Lead.objects.filter(partner=partner)
         if instance:
@@ -254,7 +280,7 @@ class LeadStatusChangeSerializer(serializers.Serializer):
 
 class BulkLeadStatusChangeSerializer(serializers.Serializer):
     lead_ids = serializers.ListField(
-        child=serializers.UUIDField(),
+        child=serializers.IntegerField(min_value=1),
         allow_empty=False,
     )
     to_status = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.filter(is_active=True))
@@ -276,7 +302,16 @@ class BulkLeadStatusChangeSerializer(serializers.Serializer):
 
 
 class LeadAssignManagerSerializer(serializers.Serializer):
-    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(role__in=ASSIGNEE_ROLES, is_active=True))
+    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
+class LeadChangeFirstManagerSerializer(serializers.Serializer):
+    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
     def validate(self, attrs):
@@ -286,10 +321,10 @@ class LeadAssignManagerSerializer(serializers.Serializer):
 
 class BulkLeadAssignManagerSerializer(serializers.Serializer):
     lead_ids = serializers.ListField(
-        child=serializers.UUIDField(),
+        child=serializers.IntegerField(min_value=1),
         allow_empty=False,
     )
-    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(role__in=ASSIGNEE_ROLES, is_active=True))
+    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
     allow_partial = serializers.BooleanField(required=False, default=False)
 
@@ -313,7 +348,7 @@ class LeadUnassignManagerSerializer(serializers.Serializer):
 
 class BulkLeadUnassignManagerSerializer(serializers.Serializer):
     lead_ids = serializers.ListField(
-        child=serializers.UUIDField(),
+        child=serializers.IntegerField(min_value=1),
         allow_empty=False,
     )
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)

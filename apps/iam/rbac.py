@@ -16,6 +16,7 @@ class Perm:
     # Brands
     BRANDS_READ = "brands.read"
     BRANDS_WRITE = "brands.write"
+    BRANDS_HARD_DELETE = "brands.hard_delete"
 
     # Leads (пример на будущее)
     LEADS_READ = "leads.read"
@@ -33,7 +34,7 @@ class Perm:
 ROLE_PERMS: dict[str, set[str]] = {
     UserRole.SUPERUSER: {
         Perm.IAM_USERS_READ, Perm.IAM_USERS_WRITE, Perm.IAM_USERS_HARD_DELETE,
-        Perm.BRANDS_READ, Perm.BRANDS_WRITE,
+        Perm.BRANDS_READ, Perm.BRANDS_WRITE, Perm.BRANDS_HARD_DELETE,
         Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_HARD_DELETE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
         Perm.LEAD_STATUSES_READ, Perm.LEAD_STATUSES_WRITE, Perm.LEAD_STATUSES_HARD_DELETE,
     },
@@ -46,16 +47,16 @@ ROLE_PERMS: dict[str, set[str]] = {
     UserRole.TEAMLEADER: {
         Perm.IAM_USERS_READ,
         Perm.BRANDS_READ,
-        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE, Perm.LEADS_ASSIGN_MANAGER,
         Perm.LEAD_STATUSES_READ,
     },
     UserRole.MANAGER: {
         Perm.BRANDS_READ,
-        Perm.LEADS_READ, Perm.LEADS_WRITE,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE,
     },
     UserRole.RET: {
         Perm.BRANDS_READ,
-        Perm.LEADS_READ, Perm.LEADS_WRITE,
+        Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE,
     },
 }
 

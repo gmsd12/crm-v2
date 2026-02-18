@@ -27,6 +27,11 @@ class Pipeline(BaseModel):
 
 
 class LeadStatus(BaseModel):
+    class ConversionBucket(models.TextChoices):
+        WON = "WON", "Won"
+        LOST = "LOST", "Lost"
+        IGNORE = "IGNORE", "Ignore"
+
     pipeline = models.ForeignKey(Pipeline, on_delete=models.PROTECT, related_name="statuses")
     code = models.SlugField(max_length=64)
     name = models.CharField(max_length=255)
@@ -36,6 +41,12 @@ class LeadStatus(BaseModel):
     is_active = models.BooleanField(default=True)
     is_terminal = models.BooleanField(default=False)
     counts_for_conversion = models.BooleanField(default=False)
+    conversion_bucket = models.CharField(
+        max_length=16,
+        choices=ConversionBucket.choices,
+        default=ConversionBucket.IGNORE,
+        db_index=True,
+    )
 
     class Meta:
         db_table = "lead_statuses"
@@ -110,12 +121,27 @@ class Lead(BaseModel):
         on_delete=models.SET_NULL,
         related_name="managed_leads",
     )
+    first_manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="first_managed_leads",
+    )
+    won_by_manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="won_leads",
+    )
     source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     pipeline = models.ForeignKey("leads.Pipeline", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
     status = models.ForeignKey("leads.LeadStatus", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
 
     # idempotency: partner can push same external_id safely
     external_id = models.CharField(max_length=128, null=True, blank=True)
+    geo = models.CharField(max_length=2, blank=True, default="", db_index=True)
     full_name = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
     email = models.EmailField(blank=True, default="", db_index=True)
@@ -123,9 +149,9 @@ class Lead(BaseModel):
     next_contact_at = models.DateTimeField(null=True, blank=True, db_index=True)
     last_contacted_at = models.DateTimeField(null=True, blank=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
-    expected_revenue = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-    currency = models.CharField(max_length=3, default="USD")
-    product = models.CharField(max_length=255, blank=True, default="")
+    first_assigned_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    won_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    sales_closed = models.BooleanField(default=False, db_index=True)
     custom_fields = models.JSONField(default=dict, blank=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -140,6 +166,8 @@ class Lead(BaseModel):
             models.Index(fields=["partner", "phone"]),
             models.Index(fields=["partner", "email"]),
             models.Index(fields=["partner", "priority", "received_at"]),
+            models.Index(fields=["first_manager", "first_assigned_at"]),
+            models.Index(fields=["won_by_manager", "won_at"]),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -147,18 +175,13 @@ class Lead(BaseModel):
                 condition=Q(external_id__isnull=False),
                 name="uniq_partner_external_id_notnull",
             ),
-            models.CheckConstraint(
-                condition=Q(expected_revenue__isnull=True) | Q(expected_revenue__gte=0),
-                name="check_lead_expected_revenue_non_negative",
-            ),
         ]
 
     def __str__(self) -> str:
         return f"Lead {self.pk} partner={self.partner_id}"
 
 
-class LeadComment(models.Model):
-    id = models.BigAutoField(primary_key=True)
+class LeadComment(BaseModel):
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="comments")
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -169,8 +192,6 @@ class LeadComment(models.Model):
     )
     body = models.TextField()
     is_pinned = models.BooleanField(default=False, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "lead_comments"
@@ -204,7 +225,7 @@ class LeadDuplicateAttempt(models.Model):
         return f"LeadDuplicateAttempt {self.pk} partner={self.partner_id} phone={self.phone}"
 
 
-class LeadStatusAuditEvent(models.TextChoices):
+class LeadAuditEvent(models.TextChoices):
     STATUS_CHANGED = "status_changed", "Status Changed"
     STATUS_CREATED = "status_created", "Status Created"
     STATUS_UPDATED = "status_updated", "Status Updated"
@@ -213,9 +234,28 @@ class LeadStatusAuditEvent(models.TextChoices):
     MANAGER_ASSIGNED = "manager_assigned", "Manager Assigned"
     MANAGER_REASSIGNED = "manager_reassigned", "Manager Reassigned"
     MANAGER_UNASSIGNED = "manager_unassigned", "Manager Unassigned"
+    LEAD_CREATED = "lead_created", "Lead Created"
+    LEAD_UPDATED = "lead_updated", "Lead Updated"
+    LEAD_SOFT_DELETED = "lead_soft_deleted", "Lead Soft Deleted"
+    LEAD_RESTORED = "lead_restored", "Lead Restored"
+    LEAD_HARD_DELETED = "lead_hard_deleted", "Lead Hard Deleted"
+    COMMENT_CREATED = "comment_created", "Comment Created"
+    COMMENT_UPDATED = "comment_updated", "Comment Updated"
+    COMMENT_SOFT_DELETED = "comment_soft_deleted", "Comment Soft Deleted"
+    COMMENT_RESTORED = "comment_restored", "Comment Restored"
+    COMMENT_PINNED = "comment_pinned", "Comment Pinned"
+    COMMENT_UNPINNED = "comment_unpinned", "Comment Unpinned"
+    DUPLICATE_REJECTED = "duplicate_rejected", "Duplicate Rejected"
 
 
-class LeadStatusAuditSource(models.TextChoices):
+class LeadAuditEntity(models.TextChoices):
+    LEAD = "lead", "Lead"
+    LEAD_STATUS = "lead_status", "Lead Status"
+    LEAD_COMMENT = "lead_comment", "Lead Comment"
+    DUPLICATE_ATTEMPT = "duplicate_attempt", "Duplicate Attempt"
+
+
+class LeadAuditSource(models.TextChoices):
     API = "api", "API"
     ADMIN = "admin", "Admin"
     SYSTEM = "system", "System"
@@ -231,10 +271,12 @@ class LeadStatusIdempotencyEndpoint(models.TextChoices):
     BULK_UNASSIGN_MANAGER = "bulk_unassign_manager", "Bulk Unassign Manager"
 
 
-class LeadStatusAuditLog(models.Model):
+class LeadAuditLog(models.Model):
     id = models.BigAutoField(primary_key=True)
     lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="status_audit_logs")
-    event_type = models.CharField(max_length=64, choices=LeadStatusAuditEvent.choices)
+    event_type = models.CharField(max_length=64, choices=LeadAuditEvent.choices)
+    entity_type = models.CharField(max_length=32, choices=LeadAuditEntity.choices, default=LeadAuditEntity.LEAD)
+    entity_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
     from_status = models.ForeignKey(
         LeadStatus,
         null=True,
@@ -256,21 +298,30 @@ class LeadStatusAuditLog(models.Model):
         on_delete=models.SET_NULL,
         related_name="lead_status_audit_events",
     )
-    source = models.CharField(max_length=32, choices=LeadStatusAuditSource.choices, default=LeadStatusAuditSource.API)
+    source = models.CharField(max_length=32, choices=LeadAuditSource.choices, default=LeadAuditSource.API)
     reason = models.TextField(blank=True, default="")
+    batch_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
     payload_before = models.JSONField(null=True, blank=True)
     payload_after = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        db_table = "lead_status_audit_logs"
+        db_table = "lead_audit_logs"
         indexes = [
             models.Index(fields=["event_type", "created_at"]),
             models.Index(fields=["lead", "created_at"]),
+            models.Index(fields=["entity_type", "created_at"]),
+            models.Index(fields=["batch_id", "created_at"]),
         ]
 
     def __str__(self) -> str:
         return f"{self.event_type} lead={self.lead_id} at={self.created_at.isoformat()}"
+
+
+# Backward compatibility for existing imports.
+LeadStatusAuditEvent = LeadAuditEvent
+LeadStatusAuditSource = LeadAuditSource
+LeadStatusAuditLog = LeadAuditLog
 
 
 class LeadStatusIdempotencyKey(models.Model):

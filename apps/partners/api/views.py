@@ -2,15 +2,24 @@ from __future__ import annotations
 
 from rest_framework import mixins, viewsets, status
 from django_filters.rest_framework import FilterSet, filters
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.iam.api.rbac_mixins import RBACActionMixin
+from apps.iam.api.rbac_permissions import RBACPermission
+from apps.iam.rbac import Perm
 from apps.partners.auth import PartnerTokenAuthentication
+from apps.partners.models import Partner, PartnerSource, PartnerToken
 from apps.partners.pagination import PartnerLeadPagination
 from apps.partners.permissions import IsPartnerAuthenticated
 from apps.partners.throttling import PartnerTokenRateThrottle
-from apps.partners.models import PartnerSource
 from apps.leads.models import Lead
 from .serializers import (
+    PartnerAdminSerializer,
+    PartnerSourceAdminSerializer,
+    PartnerTokenAdminSerializer,
     PartnerSourceSerializer,
     LeadCreateSerializer,
     LeadListSerializer,
@@ -25,6 +34,66 @@ class PartnerSourceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         partner = self.request.partner_auth.partner
         return PartnerSource.objects.filter(partner=partner).order_by("code")
+
+
+class _BasePartnerCatalogAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, RBACPermission]
+    action_perms = {
+        "list": (Perm.BRANDS_READ,),
+        "retrieve": (Perm.BRANDS_READ,),
+        "create": (Perm.BRANDS_WRITE,),
+        "update": (Perm.BRANDS_WRITE,),
+        "partial_update": (Perm.BRANDS_WRITE,),
+        "soft_delete": (Perm.BRANDS_WRITE,),
+        "restore": (Perm.BRANDS_WRITE,),
+        "destroy": (Perm.BRANDS_HARD_DELETE,),
+    }
+    filter_backends = [DjangoFilterBackend]
+
+    def perform_destroy(self, instance):
+        instance.hard_delete()
+
+    @action(detail=True, methods=["post"])
+    def soft_delete(self, request, pk=None):
+        instance = self.get_object()
+        instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        instance = self.get_object()
+        instance.restore()
+        return Response(status=status.HTTP_200_OK)
+
+
+class PartnerAdminViewSet(_BasePartnerCatalogAdminViewSet):
+    serializer_class = PartnerAdminSerializer
+    filterset_fields = ["is_active", "code", "name"]
+
+    def get_queryset(self):
+        if self.action in {"restore"}:
+            return Partner.all_objects.all().order_by("code")
+        return Partner.objects.all().order_by("code")
+
+
+class PartnerSourceAdminViewSet(_BasePartnerCatalogAdminViewSet):
+    serializer_class = PartnerSourceAdminSerializer
+    filterset_fields = ["partner", "is_active", "code"]
+
+    def get_queryset(self):
+        if self.action in {"restore"}:
+            return PartnerSource.all_objects.select_related("partner").all().order_by("partner__code", "code")
+        return PartnerSource.objects.select_related("partner").all().order_by("partner__code", "code")
+
+
+class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
+    serializer_class = PartnerTokenAdminSerializer
+    filterset_fields = ["partner", "source", "is_active", "name"]
+
+    def get_queryset(self):
+        if self.action in {"restore"}:
+            return PartnerToken.all_objects.select_related("partner", "source").all().order_by("-created_at")
+        return PartnerToken.objects.select_related("partner", "source").all().order_by("-created_at")
 
 
 class LeadFilter(FilterSet):

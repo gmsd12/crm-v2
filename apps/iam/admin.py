@@ -10,6 +10,7 @@ class UserAdmin(DjangoUserAdmin):
     list_display = ("username", "role", "is_active", "is_staff", "is_superuser")
     list_filter = ("role", "is_active", "is_staff", "is_superuser")
     search_fields = ("username",)
+    list_editable = ('role',)
 
     # Убираем email/first_name/last_name из форм админки
     fieldsets = (

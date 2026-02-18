@@ -101,7 +101,7 @@ class IamUsersRBACTests(APITestCase):
         response = self.client.get("/api/v1/iam/users/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(len(response.data), 1)
+        self.assertGreaterEqual(len(response.data["results"]), 1)
 
     def test_manager_cannot_list_users(self):
         manager = User.objects.create_user(username="manager_user", password="pass12345", role=UserRole.MANAGER)
@@ -128,7 +128,7 @@ class IamUsersRBACTests(APITestCase):
         response = self.client.get("/api/v1/iam/users/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(len(response.data), 1)
+        self.assertGreaterEqual(len(response.data["results"]), 1)
 
     def test_teamleader_cannot_create_user(self):
         teamleader = User.objects.create_user(username="tl_user", password="pass12345", role=UserRole.TEAMLEADER)

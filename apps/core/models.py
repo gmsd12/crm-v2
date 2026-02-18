@@ -1,4 +1,3 @@
-import uuid
 from django.db import models
 from django.utils import timezone
 
@@ -64,12 +63,7 @@ class SoftDeleteModel(models.Model):
 
 
 class BaseModel(TimeStampedModel, SoftDeleteModel):
-    """
-    Базовая сущность.
-    Сейчас PK = UUID. Если тебе нужна 1:1 совместимость со старой БД (int),
-    это надо менять ПРЯМО СЕЙЧАС (пока доменные модели не размножились).
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.BigAutoField(primary_key=True)
 
     class Meta:
         abstract = True
