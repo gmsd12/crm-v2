@@ -154,7 +154,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             "id",
-            "external_id",
             "source_code",
             "geo",
             "full_name",
@@ -165,6 +164,10 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             "received_at",
         ]
         read_only_fields = ["id", "received_at"]
+        validators = []
+        extra_kwargs = {
+            "phone": {"validators": []},
+        }
 
     def validate(self, attrs):
         request = self.context["request"]
@@ -176,21 +179,23 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         if token_bound_source:
             # токен привязан к source => игнорируем source_code от клиента
             attrs["_source"] = token_bound_source
-            return attrs
-
-        if source_code:
-            source = PartnerSource.objects.filter(partner=partner_auth.partner, code=source_code,
-                                                  is_active=True).first()
-            if not source:
-                raise serializers.ValidationError({"source_code": "Unknown source_code for this partner"})
-            attrs["_source"] = source
         else:
-            attrs["_source"] = None
+            if source_code:
+                source = PartnerSource.objects.filter(
+                    partner=partner_auth.partner,
+                    code=source_code,
+                    is_active=True,
+                ).first()
+                if not source:
+                    raise serializers.ValidationError({"source_code": "Unknown source_code for this partner"})
+                attrs["_source"] = source
+            else:
+                attrs["_source"] = None
 
         phone = (attrs.get("phone") or "").strip()
         email = (attrs.get("email") or "").strip()
-        if not phone and not email:
-            raise serializers.ValidationError({"phone": "Either phone or email is required"})
+        if not phone:
+            raise serializers.ValidationError({"phone": "phone is required"})
 
         attrs["phone"] = phone
         attrs["email"] = email
@@ -209,7 +214,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         validated_data.pop("source_code", None)
 
         partner = partner_auth.partner
-        external_id = validated_data.get("external_id")
         default_status = (
             LeadStatus.objects.select_related("pipeline")
             .filter(is_default_for_new_leads=True, is_active=True, pipeline__is_active=True)
@@ -221,7 +225,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
 
         # дубли учитываем только по телефону: не создаём лид, а записываем попытку
         if phone:
-            duplicate_lead = Lead.objects.filter(partner=partner, phone=phone).order_by("received_at").first()
+            duplicate_lead = Lead.objects.filter(phone=phone).order_by("received_at").first()
             if duplicate_lead:
                 attempt = LeadDuplicateAttempt.objects.create(
                     partner=partner,
@@ -253,25 +257,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 duplicate_lead._duplicate_rejected = True
                 return duplicate_lead
 
-        # Нет external_id => всегда новый лид
-        if not external_id:
-            lead = Lead.objects.create(
-                partner=partner,
-                source=source,
-                pipeline=pipeline,
-                status=default_status,
-                **validated_data,
-            )
-            lead._was_created = True
-            return lead
-
-        # Есть external_id => идемпотентно: либо создаём, либо возвращаем существующий БЕЗ обновления
-        existing = Lead.objects.filter(partner=partner, external_id=external_id).first()
-        if existing:
-            existing._was_created = False
-            existing._duplicate_rejected = False
-            return existing
-
         try:
             with transaction.atomic():
                 lead = Lead.objects.create(
@@ -285,11 +270,39 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 lead._duplicate_rejected = False
                 return lead
         except IntegrityError:
-            # параллельный create — просто читаем
-            lead = Lead.objects.get(partner=partner, external_id=external_id)
-            lead._was_created = False
-            lead._duplicate_rejected = False
-            return lead
+            # параллельный create того же phone: возвращаем как duplicate_rejected
+            duplicate_lead = Lead.objects.filter(phone=phone).order_by("received_at").first()
+            if not duplicate_lead:
+                raise
+            attempt = LeadDuplicateAttempt.objects.create(
+                partner=partner,
+                source=source,
+                existing_lead=duplicate_lead,
+                phone=phone,
+                full_name=validated_data.get("full_name") or "",
+                email=validated_data.get("email") or "",
+            )
+            LeadAuditLog.objects.create(
+                lead=duplicate_lead,
+                event_type=LeadAuditEvent.DUPLICATE_REJECTED,
+                entity_type=LeadAuditEntity.DUPLICATE_ATTEMPT,
+                entity_id=str(attempt.id),
+                source=LeadAuditSource.IMPORT,
+                reason="Duplicate phone rejected",
+                payload_before={"lead_id": str(duplicate_lead.id), "phone": duplicate_lead.phone},
+                payload_after={
+                    "attempt_id": str(attempt.id),
+                    "partner_id": str(partner.id),
+                    "source_id": str(source.id) if source else None,
+                    "existing_lead_id": str(duplicate_lead.id),
+                    "phone": attempt.phone,
+                    "full_name": attempt.full_name,
+                    "email": attempt.email,
+                },
+            )
+            duplicate_lead._was_created = False
+            duplicate_lead._duplicate_rejected = True
+            return duplicate_lead
 
 
 class LeadListSerializer(serializers.ModelSerializer):
@@ -301,7 +314,6 @@ class LeadListSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             "id",
-            "external_id",
             "geo",
             "pipeline",
             "status",

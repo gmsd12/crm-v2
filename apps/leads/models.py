@@ -40,7 +40,7 @@ class LeadStatus(BaseModel):
     is_default_for_new_leads = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_terminal = models.BooleanField(default=False)
-    counts_for_conversion = models.BooleanField(default=False)
+    is_valid = models.BooleanField(default=False, db_index=True)
     conversion_bucket = models.CharField(
         max_length=16,
         choices=ConversionBucket.choices,
@@ -113,6 +113,11 @@ class Lead(BaseModel):
         HIGH = 30, "High"
         URGENT = 40, "Urgent"
 
+    class StageOutcome(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        WON = "WON", "Won"
+        LOST = "LOST", "Lost"
+
     partner = models.ForeignKey(Partner, on_delete=models.PROTECT, related_name="leads")
     manager = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -128,19 +133,10 @@ class Lead(BaseModel):
         on_delete=models.SET_NULL,
         related_name="first_managed_leads",
     )
-    won_by_manager = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="won_leads",
-    )
     source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     pipeline = models.ForeignKey("leads.Pipeline", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
     status = models.ForeignKey("leads.LeadStatus", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
 
-    # idempotency: partner can push same external_id safely
-    external_id = models.CharField(max_length=128, null=True, blank=True)
     geo = models.CharField(max_length=2, blank=True, default="", db_index=True)
     full_name = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
@@ -150,8 +146,21 @@ class Lead(BaseModel):
     last_contacted_at = models.DateTimeField(null=True, blank=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
     first_assigned_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    won_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    sales_closed = models.BooleanField(default=False, db_index=True)
+    manager_outcome = models.CharField(
+        max_length=16,
+        choices=StageOutcome.choices,
+        default=StageOutcome.PENDING,
+        db_index=True,
+    )
+    manager_outcome_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    manager_outcome_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="manager_outcome_leads",
+    )
+    transferred_to_ret_at = models.DateTimeField(null=True, blank=True, db_index=True)
     custom_fields = models.JSONField(default=dict, blank=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -162,23 +171,116 @@ class Lead(BaseModel):
             models.Index(fields=["partner", "received_at"]),
             models.Index(fields=["manager", "received_at"]),
             models.Index(fields=["partner", "source", "received_at"]),
-            models.Index(fields=["partner", "external_id"]),
             models.Index(fields=["partner", "phone"]),
             models.Index(fields=["partner", "email"]),
             models.Index(fields=["partner", "priority", "received_at"]),
             models.Index(fields=["first_manager", "first_assigned_at"]),
-            models.Index(fields=["won_by_manager", "won_at"]),
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=["partner", "external_id"],
-                condition=Q(external_id__isnull=False),
-                name="uniq_partner_external_id_notnull",
+                fields=["phone"],
+                condition=Q(is_deleted=False) & ~Q(phone=""),
+                name="uniq_lead_phone_alive_nonempty",
             ),
         ]
 
     def __str__(self) -> str:
         return f"Lead {self.pk} partner={self.partner_id}"
+
+
+class LeadDeposit(BaseModel):
+    class Type(models.IntegerChoices):
+        FTD = 1, "FTD"
+        RELOAD = 2, "Reload"
+        DEPOSIT = 3, "Deposit"
+
+    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="deposits")
+    creator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_lead_deposits",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    type = models.PositiveSmallIntegerField(choices=Type.choices, default=Type.DEPOSIT, db_index=True)
+
+    class Meta:
+        db_table = "lead_deposits"
+        indexes = [
+            models.Index(fields=["lead", "created_at"]),
+            models.Index(fields=["creator", "created_at"]),
+            models.Index(fields=["type", "created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["lead"],
+                condition=Q(type=1, is_deleted=False),
+                name="uniq_lead_ftd_alive",
+            ),
+            models.UniqueConstraint(
+                fields=["lead"],
+                condition=Q(type=2, is_deleted=False),
+                name="uniq_lead_reload_alive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"LeadDeposit {self.pk} lead={self.lead_id} type={self.type}"
+
+
+class LeadRetTransfer(BaseModel):
+    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="ret_transfers")
+    from_manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ret_transfers_from",
+    )
+    to_ret = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ret_transfers_to",
+    )
+    transferred_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ret_transfers_created",
+    )
+    transferred_at = models.DateTimeField(default=timezone.now, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    reason = models.TextField(blank=True, default="")
+    rolled_back_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    rolled_back_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ret_transfers_rolled_back",
+    )
+    rollback_reason = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "lead_ret_transfers"
+        indexes = [
+            models.Index(fields=["lead", "is_active"]),
+            models.Index(fields=["transferred_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["lead"],
+                condition=Q(is_active=True, is_deleted=False),
+                name="uniq_active_ret_transfer_per_lead",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"LeadRetTransfer {self.pk} lead={self.lead_id} active={self.is_active}"
 
 
 class LeadComment(BaseModel):
@@ -246,6 +348,10 @@ class LeadAuditEvent(models.TextChoices):
     COMMENT_PINNED = "comment_pinned", "Comment Pinned"
     COMMENT_UNPINNED = "comment_unpinned", "Comment Unpinned"
     DUPLICATE_REJECTED = "duplicate_rejected", "Duplicate Rejected"
+    DEPOSIT_CREATED = "deposit_created", "Deposit Created"
+    DEPOSIT_REVERSED = "deposit_reversed", "Deposit Reversed"
+    RET_TRANSFERRED = "ret_transferred", "Transferred To RET"
+    RET_TRANSFER_ROLLBACK = "ret_transfer_rollback", "RET Transfer Rollback"
 
 
 class LeadAuditEntity(models.TextChoices):

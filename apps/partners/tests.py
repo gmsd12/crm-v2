@@ -29,10 +29,10 @@ class PartnerLeadApiTests(APITestCase):
         self.token = PartnerToken.build(partner=self.partner, raw_token=self.raw_token, name="test")
         self.token.save()
 
-    def test_partner_lead_create_is_idempotent_by_external_id(self):
+    def test_partner_lead_create_rejects_duplicate_phone(self):
         url = "/api/v1/partner/leads/"
         payload = {
-            "external_id": "ext-001",
+            "phone": "+155500001",
             "source_code": self.source.code,
             "full_name": "John Doe",
             "email": "lead@example.com",
@@ -47,7 +47,8 @@ class PartnerLeadApiTests(APITestCase):
         self.assertTrue(first.data["created"])
         self.assertEqual(second.status_code, 200)
         self.assertFalse(second.data["created"])
-        self.assertEqual(Lead.objects.filter(partner=self.partner, external_id="ext-001").count(), 1)
+        self.assertTrue(second.data["duplicate_rejected"])
+        self.assertEqual(Lead.objects.filter(phone="+155500001").count(), 1)
 
     def test_partner_lead_with_invalid_token_returns_401(self):
         response = self.client.post(
@@ -63,7 +64,7 @@ class PartnerLeadApiTests(APITestCase):
     def test_partner_lead_with_unknown_source_returns_400(self):
         response = self.client.post(
             "/api/v1/partner/leads/",
-            {"external_id": "ext-unknown", "source_code": "unknown", "email": "unknown@example.com"},
+            {"phone": "+155500099", "source_code": "unknown", "email": "unknown@example.com"},
             format="json",
             HTTP_X_PARTNER_TOKEN=self.raw_token,
         )
@@ -75,7 +76,6 @@ class PartnerLeadApiTests(APITestCase):
         response = self.client.post(
             "/api/v1/partner/leads/",
             {
-                "external_id": "ext-geo-1",
                 "phone": "+19990001",
                 "geo": "ru",
             },
@@ -85,14 +85,13 @@ class PartnerLeadApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["geo"], "RU")
-        lead = Lead.objects.get(partner=self.partner, external_id="ext-geo-1")
+        lead = Lead.objects.get(partner=self.partner, phone="+19990001")
         self.assertEqual(lead.geo, "RU")
 
     def test_partner_lead_with_invalid_geo_returns_400(self):
         response = self.client.post(
             "/api/v1/partner/leads/",
             {
-                "external_id": "ext-geo-invalid",
                 "phone": "+19990002",
                 "geo": "RUS",
             },
@@ -128,21 +127,21 @@ class PartnerLeadFilterApiTests(APITestCase):
         self.lead_google = Lead.objects.create(
             partner=self.partner,
             source=self.google_source,
-            external_id="ext-google",
+            phone="+19990101",
             custom_fields={"name": "Google Lead"},
             received_at=now - timedelta(hours=2),
         )
         self.lead_facebook = Lead.objects.create(
             partner=self.partner,
             source=self.fb_source,
-            external_id="ext-facebook",
+            phone="+19990102",
             custom_fields={"name": "Facebook Lead"},
             received_at=now - timedelta(hours=1),
         )
         self.lead_without_source = Lead.objects.create(
             partner=self.partner,
             source=None,
-            external_id="ext-no-source",
+            phone="+19990103",
             custom_fields={"name": "No Source Lead"},
             received_at=now,
         )
@@ -151,7 +150,7 @@ class PartnerLeadFilterApiTests(APITestCase):
         Lead.objects.create(
             partner=other_partner,
             source=None,
-            external_id="ext-foreign",
+            phone="+19990200",
             custom_fields={"name": "Foreign Lead"},
             received_at=now - timedelta(hours=1),
         )
@@ -161,14 +160,14 @@ class PartnerLeadFilterApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["external_id"], self.lead_google.external_id)
+        self.assertEqual(response.data["results"][0]["id"], self.lead_google.id)
 
-    def test_filter_by_external_id(self):
-        response = self.client.get("/api/v1/partner/leads/", {"external_id": "ext-facebook"}, **self.headers)
+    def test_filter_by_phone(self):
+        response = self.client.get("/api/v1/partner/leads/", {"phone": self.lead_facebook.phone}, **self.headers)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["external_id"], self.lead_facebook.external_id)
+        self.assertEqual(response.data["results"][0]["id"], self.lead_facebook.id)
 
     def test_filter_by_received_from_and_to(self):
         response = self.client.get(
@@ -182,7 +181,7 @@ class PartnerLeadFilterApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["external_id"], self.lead_facebook.external_id)
+        self.assertEqual(response.data["results"][0]["id"], self.lead_facebook.id)
 
     def test_list_has_pagination_shape(self):
         response = self.client.get("/api/v1/partner/leads/", {}, **self.headers)

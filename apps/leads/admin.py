@@ -2,6 +2,8 @@ from django.contrib import admin
 from .models import (
     LeadAuditLog,
     Lead,
+    LeadDeposit,
+    LeadRetTransfer,
     LeadComment,
     LeadDuplicateAttempt,
     LeadStatus,
@@ -42,11 +44,11 @@ class LeadStatusAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "is_default_for_new_leads",
         "is_active",
         "is_terminal",
-        "counts_for_conversion",
+        "is_valid",
         "conversion_bucket",
         "is_deleted",
     )
-    list_filter = ("pipeline", "is_active", "is_terminal", "counts_for_conversion", "is_deleted")
+    list_filter = ("pipeline", "is_active", "is_terminal", "is_valid", "is_deleted")
     search_fields = ("code", "name", "pipeline__code", "pipeline__name")
     ordering = ("pipeline__code", "order", "code")
     actions = ("restore_selected",)
@@ -70,19 +72,27 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "phone",
         "manager",
         "first_manager",
-        "won_by_manager",
-        "sales_closed",
+        "manager_outcome",
+        "transferred_to_ret_at",
         "priority",
         "pipeline",
         "status",
         "source",
-        "external_id",
         "received_at",
         "is_deleted",
     )
-    list_filter = ("partner", "manager", "first_manager", "won_by_manager", "sales_closed", "priority", "pipeline", "status", "source", "is_deleted")
+    list_filter = (
+        "partner",
+        "manager",
+        "first_manager",
+        "manager_outcome",
+        "priority",
+        "pipeline",
+        "status",
+        "source",
+        "is_deleted",
+    )
     search_fields = (
-        "external_id",
         "full_name",
         "phone",
         "email",
@@ -102,8 +112,38 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
 class LeadCommentAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("id", "lead", "author", "is_pinned", "created_at", "is_deleted",)
     list_filter = ("is_pinned", "created_at", "is_deleted",)
-    search_fields = ("lead__external_id", "author__username", "body")
+    search_fields = ("lead__id", "lead__phone", "author__username", "body")
     ordering = ("-created_at",)
+    readonly_fields = ("created_at", "updated_at", "deleted_at")
+    actions = ("restore_selected",)
+
+
+@admin.register(LeadDeposit)
+class LeadDepositAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("id", "lead", "type", "amount", "creator", "created_at", "is_deleted")
+    list_filter = ("type", "creator", "is_deleted")
+    search_fields = ("lead__id", "lead__phone", "creator__username")
+    ordering = ("-created_at",)
+    readonly_fields = ("created_at", "updated_at", "deleted_at")
+    actions = ("restore_selected",)
+
+
+@admin.register(LeadRetTransfer)
+class LeadRetTransferAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "id",
+        "lead",
+        "from_manager",
+        "to_ret",
+        "transferred_by",
+        "transferred_at",
+        "is_active",
+        "rolled_back_at",
+        "is_deleted",
+    )
+    list_filter = ("is_active", "is_deleted", "to_ret", "from_manager")
+    search_fields = ("lead__id", "lead__phone", "from_manager__username", "to_ret__username")
+    ordering = ("-transferred_at",)
     readonly_fields = ("created_at", "updated_at", "deleted_at")
     actions = ("restore_selected",)
 
@@ -133,7 +173,7 @@ class LeadAuditLogAdmin(admin.ModelAdmin):
         "created_at",
     )
     list_filter = ("entity_type", "event_type", "source", "created_at")
-    search_fields = ("entity_id", "lead__external_id", "from_status__code", "to_status__code", "actor_user__username")
+    search_fields = ("entity_id", "lead__id", "lead__phone", "from_status__code", "to_status__code", "actor_user__username")
     ordering = ("-created_at",)
     readonly_fields = ("created_at",)
 

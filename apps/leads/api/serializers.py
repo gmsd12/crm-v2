@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -12,6 +13,7 @@ from apps.leads.models import (
     LeadAuditLog,
     Lead,
     LeadComment,
+    LeadDeposit,
     LeadStatus,
     LeadStatusTransition,
     Pipeline,
@@ -19,7 +21,6 @@ from apps.leads.models import (
 from apps.partners.models import Partner
 
 User = get_user_model()
-ASSIGNEE_ROLES = (UserRole.MANAGER, UserRole.RET)
 GEO_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 
@@ -43,7 +44,7 @@ class LeadStatusSerializer(serializers.ModelSerializer):
             "is_default_for_new_leads",
             "is_active",
             "is_terminal",
-            "counts_for_conversion",
+            "is_valid",
             "conversion_bucket",
             "created_at",
             "updated_at",
@@ -115,19 +116,16 @@ class LeadSerializer(serializers.ModelSerializer):
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     first_manager = serializers.SerializerMethodField()
-    won_by_manager = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
         fields = [
             "id",
-            "external_id",
             "geo",
             "partner",
             "manager",
             "first_manager",
-            "won_by_manager",
             "source",
             "pipeline",
             "status",
@@ -139,8 +137,10 @@ class LeadSerializer(serializers.ModelSerializer):
             "last_contacted_at",
             "assigned_at",
             "first_assigned_at",
-            "won_at",
-            "sales_closed",
+            "manager_outcome",
+            "manager_outcome_at",
+            "manager_outcome_by",
+            "transferred_to_ret_at",
             "custom_fields",
             "received_at",
         ]
@@ -168,11 +168,6 @@ class LeadSerializer(serializers.ModelSerializer):
             return None
         return {"id": str(obj.first_manager_id), "username": obj.first_manager.username}
 
-    def get_won_by_manager(self, obj):
-        if not obj.won_by_manager_id:
-            return None
-        return {"id": str(obj.won_by_manager_id), "username": obj.won_by_manager.username}
-
     def get_source(self, obj):
         if not obj.source_id:
             return None
@@ -186,7 +181,6 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "id",
             "partner",
             "source",
-            "external_id",
             "geo",
             "full_name",
             "phone",
@@ -197,13 +191,13 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "custom_fields",
         ]
         read_only_fields = ["id"]
+        validators = []
         extra_kwargs = {
             "partner": {"required": True},
             "source": {"required": False, "allow_null": True},
-            "external_id": {"required": False, "allow_null": True, "allow_blank": True},
             "geo": {"required": False, "allow_blank": True},
             "full_name": {"required": False, "allow_blank": True},
-            "phone": {"required": False, "allow_blank": True},
+            "phone": {"required": False, "allow_blank": True, "validators": []},
             "email": {"required": False, "allow_blank": True},
         }
 
@@ -218,8 +212,8 @@ class LeadWriteSerializer(serializers.ModelSerializer):
         email = (attrs.get("email") if "email" in attrs else getattr(instance, "email", "")) or ""
         phone = phone.strip()
         email = email.strip().lower()
-        if not phone and not email:
-            raise serializers.ValidationError({"phone": "Either phone or email is required"})
+        if not phone:
+            raise serializers.ValidationError({"phone": "phone is required"})
 
         attrs["phone"] = phone
         attrs["email"] = email
@@ -234,11 +228,11 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             if timezone.is_naive(next_contact_at):
                 attrs["next_contact_at"] = timezone.make_aware(next_contact_at, timezone.get_current_timezone())
 
-        duplicate_qs = Lead.objects.filter(partner=partner)
+        duplicate_qs = Lead.objects.all()
         if instance:
             duplicate_qs = duplicate_qs.exclude(id=instance.id)
         if phone and duplicate_qs.filter(phone=phone).exists():
-            raise serializers.ValidationError({"phone": "Duplicate phone for this partner"})
+            raise serializers.ValidationError({"phone": "Duplicate phone"})
 
         return attrs
 
@@ -246,18 +240,25 @@ class LeadWriteSerializer(serializers.ModelSerializer):
 class LeadStatusChangeSerializer(serializers.Serializer):
     to_status = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.filter(is_active=True))
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    force = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         lead = self.context["lead"]
         to_status = attrs["to_status"]
         reason = (attrs.get("reason") or "").strip()
+        force = attrs.get("force", False)
+
+        if to_status.id == lead.status_id:
+            raise serializers.ValidationError({"to_status": "Lead already has this status"})
+        if force:
+            attrs["reason"] = reason
+            attrs["_transition"] = None
+            return attrs
 
         if not lead.pipeline_id or not lead.status_id:
             raise serializers.ValidationError("Lead has no current workflow status")
         if to_status.pipeline_id != lead.pipeline_id:
             raise serializers.ValidationError({"to_status": "to_status must belong to lead pipeline"})
-        if to_status.id == lead.status_id:
-            raise serializers.ValidationError({"to_status": "Lead already has this status"})
 
         transition = (
             LeadStatusTransition.objects.filter(
@@ -286,6 +287,7 @@ class BulkLeadStatusChangeSerializer(serializers.Serializer):
     to_status = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.filter(is_active=True))
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
     allow_partial = serializers.BooleanField(required=False, default=False)
+    force = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         lead_ids = attrs["lead_ids"]
@@ -369,9 +371,7 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
     date_to = serializers.DateField(required=False)
     pipeline = serializers.PrimaryKeyRelatedField(queryset=Pipeline.objects.filter(is_active=True), required=False)
     partner = serializers.PrimaryKeyRelatedField(queryset=Partner.objects.all(), required=False)
-    manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(role__in=ASSIGNEE_ROLES), required=False)
-    group_by = serializers.ChoiceField(choices=("partner", "manager"), required=False)
-    stale_days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=7)
+    group_by = serializers.ChoiceField(choices=("partner",), required=False)
 
     def validate(self, attrs):
         date_from = attrs.get("date_from")
@@ -397,3 +397,52 @@ class LeadCommentSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "author", "author_username", "created_at", "updated_at"]
+
+
+class LeadCloseWonTransferSerializer(serializers.Serializer):
+    ret_manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        ret_manager = attrs["ret_manager"]
+        if ret_manager.role != UserRole.RET:
+            raise serializers.ValidationError({"ret_manager": "ret_manager must have RET role"})
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
+class LeadRollbackRetTransferSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
+class LeadDepositSerializer(serializers.ModelSerializer):
+    creator_username = serializers.CharField(source="creator.username", read_only=True)
+
+    class Meta:
+        model = LeadDeposit
+        fields = [
+            "id",
+            "lead",
+            "creator",
+            "creator_username",
+            "amount",
+            "type",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "lead", "creator", "creator_username", "created_at", "updated_at"]
+
+
+class LeadDepositCreateSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    type = serializers.ChoiceField(choices=LeadDeposit.Type.choices, required=False)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs

@@ -3,7 +3,7 @@
 Backend for CRM v2 with:
 - IAM auth (JWT access + refresh cookie)
 - Partner API token authentication
-- Lead ingestion with idempotency by `external_id`
+- Lead ingestion with duplicate rejection by `phone`
 
 ## Quick start
 

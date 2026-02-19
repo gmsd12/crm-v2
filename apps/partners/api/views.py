@@ -98,7 +98,7 @@ class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
 
 class LeadFilter(FilterSet):
     source = filters.CharFilter(method="filter_source")
-    external_id = filters.CharFilter(field_name="external_id", lookup_expr="exact")
+    phone = filters.CharFilter(field_name="phone", lookup_expr="exact")
     received_from = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="gte")
     received_to = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="lte")
 
@@ -111,7 +111,7 @@ class LeadFilter(FilterSet):
 
     class Meta:
         model = Lead
-        fields = ["external_id"]
+        fields = ["phone"]
 
 
 class PartnerLeadViewSet(
