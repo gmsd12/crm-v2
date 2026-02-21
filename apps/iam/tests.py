@@ -19,7 +19,12 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.data["error"]["code"], "not_authenticated")
 
     def test_login_refresh_logout_flow(self):
-        user = User.objects.create_user(username="manager1", password="pass12345")
+        user = User.objects.create_user(
+            username="manager1",
+            password="pass12345",
+            first_name="Nina",
+            last_name="Lopez",
+        )
 
         login = self.client.post(
             "/api/v1/auth/login/",
@@ -30,6 +35,8 @@ class AuthApiTests(APITestCase):
         self.assertIn("access", login.data)
         self.assertEqual(login.data["user"]["id"], user.id)
         self.assertEqual(login.data["user"]["username"], user.username)
+        self.assertEqual(login.data["user"]["first_name"], "Nina")
+        self.assertEqual(login.data["user"]["last_name"], "Lopez")
         self.assertIn(settings.JWT_REFRESH_COOKIE_NAME, login.cookies)
 
         me = self.client.get(
@@ -39,6 +46,8 @@ class AuthApiTests(APITestCase):
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.data["id"], user.id)
         self.assertEqual(me.data["username"], user.username)
+        self.assertEqual(me.data["first_name"], "Nina")
+        self.assertEqual(me.data["last_name"], "Lopez")
 
         refresh = self.client.post("/api/v1/auth/refresh/", {}, format="json")
         self.assertEqual(refresh.status_code, 200)
@@ -103,14 +112,14 @@ class IamUsersRBACTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 1)
 
-    def test_manager_cannot_list_users(self):
+    def test_manager_can_list_users(self):
         manager = User.objects.create_user(username="manager_user", password="pass12345", role=UserRole.MANAGER)
         self._auth(manager)
 
         response = self.client.get("/api/v1/iam/users/")
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(response.data["results"]), 1)
 
     def test_ret_cannot_list_users(self):
         ret = User.objects.create_user(username="ret_user", password="pass12345", role=UserRole.RET)

@@ -12,11 +12,9 @@ from apps.leads.models import (
     Lead,
     LeadComment,
     LeadStatus,
-    LeadStatusAuditEvent,
-    LeadStatusAuditLog,
-    LeadStatusAuditSource,
-    LeadStatusTransition,
-    Pipeline,
+    LeadAuditEvent,
+    LeadAuditLog,
+    LeadAuditSource,
 )
 from apps.partners.models import Partner, PartnerSource
 
@@ -29,8 +27,6 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--partner-code", default="demo", help="Partner code for demo data")
         parser.add_argument("--partner-name", default="Northwind Media", help="Partner display name")
-        parser.add_argument("--pipeline-code", default="sales", help="Pipeline code for demo leads")
-        parser.add_argument("--pipeline-name", default="Sales Pipeline", help="Pipeline display name")
         parser.add_argument("--leads", type=int, default=40, help="How many leads to add now")
         parser.add_argument("--comments", type=int, default=80, help="How many comments to add now")
         parser.add_argument("--password", default="demo12345", help="Password for demo users (created/updated)")
@@ -44,9 +40,7 @@ class Command(BaseCommand):
 
         partner = self._ensure_partner(options["partner_code"], options["partner_name"])
         sources = self._ensure_sources(partner)
-        pipeline = self._ensure_pipeline(options["pipeline_code"], options["pipeline_name"])
-        statuses = self._ensure_statuses(pipeline)
-        self._ensure_transitions(pipeline, statuses)
+        statuses = self._ensure_statuses()
 
         users = []
         if not options["without_users"]:
@@ -106,25 +100,7 @@ class Command(BaseCommand):
             result.append(source)
         return result
 
-    def _ensure_pipeline(self, code: str, name: str) -> Pipeline:
-        pipeline, created = Pipeline.objects.get_or_create(
-            code=code,
-            defaults={"name": name, "is_default": True, "is_active": True},
-        )
-        if not created:
-            changed = []
-            if pipeline.name != name:
-                pipeline.name = name
-                changed.append("name")
-            if not pipeline.is_active:
-                pipeline.is_active = True
-                changed.append("is_active")
-            if changed:
-                changed.append("updated_at")
-                pipeline.save(update_fields=changed)
-        return pipeline
-
-    def _ensure_statuses(self, pipeline: Pipeline) -> dict[str, LeadStatus]:
+    def _ensure_statuses(self) -> dict[str, LeadStatus]:
         status_defs = [
             ("NEW", "New", 10, "#3B82F6", False, False, LeadStatus.ConversionBucket.IGNORE),
             ("CONTACTED", "Contacted", 20, "#06B6D4", False, False, LeadStatus.ConversionBucket.IGNORE),
@@ -137,7 +113,6 @@ class Command(BaseCommand):
         statuses: dict[str, LeadStatus] = {}
         for code, name, order, color, is_terminal, is_valid, conversion_bucket in status_defs:
             status_obj, created = LeadStatus.objects.get_or_create(
-                pipeline=pipeline,
                 code=code,
                 defaults={
                     "name": name,
@@ -179,41 +154,11 @@ class Command(BaseCommand):
             statuses[code] = status_obj
 
         if not statuses["NEW"].is_default_for_new_leads:
-            LeadStatus.objects.filter(pipeline=pipeline, is_default_for_new_leads=True).update(is_default_for_new_leads=False)
+            LeadStatus.objects.filter(is_default_for_new_leads=True).update(is_default_for_new_leads=False)
             statuses["NEW"].is_default_for_new_leads = True
             statuses["NEW"].save(update_fields=["is_default_for_new_leads", "updated_at"])
 
         return statuses
-
-    def _ensure_transitions(self, pipeline: Pipeline, statuses: dict[str, LeadStatus]) -> None:
-        transition_defs = [
-            ("NEW", "CONTACTED", False),
-            ("CONTACTED", "QUALIFIED", False),
-            ("QUALIFIED", "PROPOSAL", False),
-            ("PROPOSAL", "WON", False),
-            ("PROPOSAL", "LOST", True),
-            ("CONTACTED", "LOST", True),
-            ("NEW", "LOST", True),
-            ("LOST", "CONTACTED", True),
-        ]
-        for from_code, to_code, requires_comment in transition_defs:
-            transition, created = LeadStatusTransition.objects.get_or_create(
-                pipeline=pipeline,
-                from_status=statuses[from_code],
-                to_status=statuses[to_code],
-                defaults={"is_active": True, "requires_comment": requires_comment},
-            )
-            if not created:
-                fields_to_update = []
-                if not transition.is_active:
-                    transition.is_active = True
-                    fields_to_update.append("is_active")
-                if transition.requires_comment != requires_comment:
-                    transition.requires_comment = requires_comment
-                    fields_to_update.append("requires_comment")
-                if fields_to_update:
-                    fields_to_update.append("updated_at")
-                    transition.save(update_fields=fields_to_update)
 
     def _ensure_demo_users(self, password: str) -> list[User]:
         user_defs = [
@@ -353,7 +298,6 @@ class Command(BaseCommand):
             manager_outcome_by = None
             manager = first_manager
             assigned_at = first_assigned_at
-            transferred_to_ret_at = None
 
             if status_obj.code == "WON":
                 manager_outcome = Lead.StageOutcome.WON
@@ -372,7 +316,6 @@ class Command(BaseCommand):
                 if ret_users and manager_outcome_by and lead_seq % 2 == 0:
                     manager = ret_users[lead_seq % len(ret_users)]
                     assigned_at = manager_outcome_at + timedelta(hours=1)
-                    transferred_to_ret_at = assigned_at
                 else:
                     manager = manager_outcome_by
                     assigned_at = manager_outcome_at
@@ -394,7 +337,6 @@ class Command(BaseCommand):
                 manager=manager,
                 first_manager=first_manager,
                 source=source,
-                pipeline=status_obj.pipeline,
                 status=status_obj,
                 geo=geo,
                 full_name=full_name,
@@ -408,7 +350,6 @@ class Command(BaseCommand):
                 manager_outcome=manager_outcome,
                 manager_outcome_at=manager_outcome_at,
                 manager_outcome_by=manager_outcome_by,
-                transferred_to_ret_at=transferred_to_ret_at,
                 custom_fields={
                     "company": company,
                     "city": self._city_for_seq(lead_seq),
@@ -450,41 +391,43 @@ class Command(BaseCommand):
             return {
                 "id": str(user.id),
                 "username": user.username,
+                "first_name": (user.first_name or "").strip(),
+                "last_name": (user.last_name or "").strip(),
                 "role": user.role,
                 "is_active": user.is_active,
             }
 
         def _update_ts(log_obj, dt_obj):
-            LeadStatusAuditLog.objects.filter(pk=log_obj.pk).update(created_at=dt_obj)
+            LeadAuditLog.objects.filter(pk=log_obj.pk).update(created_at=dt_obj)
 
         if first_manager and first_assigned_at:
-            assigned_log = LeadStatusAuditLog.objects.create(
+            assigned_log = LeadAuditLog.objects.create(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_ASSIGNED,
                 actor_user=actor_user,
-                source=LeadStatusAuditSource.SYSTEM,
+                source=LeadAuditSource.SYSTEM,
                 payload_before={"lead_id": str(lead.id), "manager": None},
                 payload_after={"lead_id": str(lead.id), "manager": _manager_payload(first_manager)},
             )
             _update_ts(assigned_log, first_assigned_at)
 
         if manager_outcome_by and first_manager and manager_outcome_by.id != first_manager.id and manager_outcome_at:
-            reassigned_log = LeadStatusAuditLog.objects.create(
+            reassigned_log = LeadAuditLog.objects.create(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.MANAGER_REASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_REASSIGNED,
                 actor_user=actor_user,
-                source=LeadStatusAuditSource.SYSTEM,
+                source=LeadAuditSource.SYSTEM,
                 payload_before={"lead_id": str(lead.id), "manager": _manager_payload(first_manager)},
                 payload_after={"lead_id": str(lead.id), "manager": _manager_payload(manager_outcome_by)},
             )
             _update_ts(reassigned_log, manager_outcome_at - timedelta(hours=1))
 
         if final_manager and manager_outcome_by and final_manager.id != manager_outcome_by.id and manager_outcome_at:
-            handoff_log = LeadStatusAuditLog.objects.create(
+            handoff_log = LeadAuditLog.objects.create(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.MANAGER_REASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_REASSIGNED,
                 actor_user=actor_user,
-                source=LeadStatusAuditSource.SYSTEM,
+                source=LeadAuditSource.SYSTEM,
                 payload_before={"lead_id": str(lead.id), "manager": _manager_payload(manager_outcome_by)},
                 payload_after={"lead_id": str(lead.id), "manager": _manager_payload(final_manager)},
             )
@@ -495,22 +438,20 @@ class Command(BaseCommand):
                 timezone.now() - timedelta(minutes=3),
                 received_at + timedelta(days=1, hours=2),
             )
-            status_log = LeadStatusAuditLog.objects.create(
+            status_log = LeadAuditLog.objects.create(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 from_status=statuses["NEW"],
                 to_status=lead.status,
                 actor_user=actor_user,
-                source=LeadStatusAuditSource.SYSTEM,
+                source=LeadAuditSource.SYSTEM,
                 payload_before={
                     "lead_id": str(lead.id),
-                    "pipeline_id": str(statuses["NEW"].pipeline_id),
                     "status_id": str(statuses["NEW"].id),
                     "status_code": statuses["NEW"].code,
                 },
                 payload_after={
                     "lead_id": str(lead.id),
-                    "pipeline_id": str(lead.pipeline_id) if lead.pipeline_id else None,
                     "status_id": str(lead.status_id) if lead.status_id else None,
                     "status_code": lead.status.code if lead.status else None,
                 },

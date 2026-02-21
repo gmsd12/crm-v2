@@ -214,13 +214,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         validated_data.pop("source_code", None)
 
         partner = partner_auth.partner
-        default_status = (
-            LeadStatus.objects.select_related("pipeline")
-            .filter(is_default_for_new_leads=True, is_active=True, pipeline__is_active=True)
-            .order_by("-pipeline__is_default", "pipeline__code", "order", "created_at")
-            .first()
-        )
-        pipeline = default_status.pipeline if default_status else None
+        default_status = LeadStatus.objects.filter(is_default_for_new_leads=True, is_active=True).order_by("order", "created_at").first()
         phone = (validated_data.get("phone") or "").strip()
 
         # дубли учитываем только по телефону: не создаём лид, а записываем попытку
@@ -262,7 +256,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 lead = Lead.objects.create(
                     partner=partner,
                     source=source,
-                    pipeline=pipeline,
                     status=default_status,
                     **validated_data,
                 )
@@ -308,14 +301,12 @@ class LeadCreateSerializer(serializers.ModelSerializer):
 class LeadListSerializer(serializers.ModelSerializer):
     source = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
-    pipeline = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
         fields = [
             "id",
             "geo",
-            "pipeline",
             "status",
             "source",
             "full_name",
@@ -335,8 +326,3 @@ class LeadListSerializer(serializers.ModelSerializer):
         if not obj.status_id:
             return None
         return {"id": str(obj.status_id), "code": obj.status.code, "name": obj.status.name}
-
-    def get_pipeline(self, obj):
-        if not obj.pipeline_id:
-            return None
-        return {"id": str(obj.pipeline_id), "code": obj.pipeline.code, "name": obj.pipeline.name}

@@ -4,26 +4,9 @@ from django.db import models
 from django.utils import timezone
 from django.db.models import Q
 from django.conf import settings
-from django.core.exceptions import ValidationError
 
 from apps.core.models import BaseModel
 from apps.partners.models import Partner, PartnerSource
-
-
-class Pipeline(BaseModel):
-    code = models.SlugField(max_length=64, unique=True)
-    name = models.CharField(max_length=255)
-    is_default = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        db_table = "lead_pipelines"
-        indexes = [
-            models.Index(fields=["is_default", "is_active"]),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.code}:{self.name}"
 
 
 class LeadStatus(BaseModel):
@@ -32,7 +15,6 @@ class LeadStatus(BaseModel):
         LOST = "LOST", "Lost"
         IGNORE = "IGNORE", "Ignore"
 
-    pipeline = models.ForeignKey(Pipeline, on_delete=models.PROTECT, related_name="statuses")
     code = models.SlugField(max_length=64)
     name = models.CharField(max_length=255)
     order = models.PositiveIntegerField(default=100)
@@ -51,59 +33,24 @@ class LeadStatus(BaseModel):
     class Meta:
         db_table = "lead_statuses"
         indexes = [
-            models.Index(fields=["pipeline", "order"]),
-            models.Index(fields=["pipeline", "is_active"]),
+            models.Index(fields=["order"]),
+            models.Index(fields=["is_active"]),
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=["pipeline", "code"],
+                fields=["code"],
                 condition=Q(is_deleted=False),
-                name="uniq_status_code_per_pipeline_alive",
+                name="uniq_status_code_alive",
             ),
             models.UniqueConstraint(
-                fields=["pipeline"],
+                fields=["is_default_for_new_leads"],
                 condition=Q(is_default_for_new_leads=True, is_deleted=False),
-                name="uniq_default_status_per_pipeline_alive",
+                name="uniq_default_status_alive",
             ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.pipeline.code}:{self.code}"
-
-
-class LeadStatusTransition(BaseModel):
-    pipeline = models.ForeignKey(Pipeline, on_delete=models.PROTECT, related_name="transitions")
-    from_status = models.ForeignKey(LeadStatus, on_delete=models.PROTECT, related_name="outgoing_transitions")
-    to_status = models.ForeignKey(LeadStatus, on_delete=models.PROTECT, related_name="incoming_transitions")
-    is_active = models.BooleanField(default=True)
-    requires_comment = models.BooleanField(default=False)
-
-    class Meta:
-        db_table = "lead_status_transitions"
-        indexes = [
-            models.Index(fields=["pipeline", "is_active"]),
-            models.Index(fields=["from_status", "to_status"]),
-        ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["pipeline", "from_status", "to_status"],
-                condition=Q(is_deleted=False),
-                name="uniq_status_transition_alive",
-            ),
-            models.CheckConstraint(
-                condition=~Q(from_status=models.F("to_status")),
-                name="check_transition_not_self",
-            ),
-        ]
-
-    def clean(self):
-        if self.from_status_id and self.pipeline_id and self.from_status.pipeline_id != self.pipeline_id:
-            raise ValidationError("from_status must belong to pipeline")
-        if self.to_status_id and self.pipeline_id and self.to_status.pipeline_id != self.pipeline_id:
-            raise ValidationError("to_status must belong to pipeline")
-
-    def __str__(self) -> str:
-        return f"{self.pipeline.code}:{self.from_status.code}->{self.to_status.code}"
+        return self.code
 
 
 class Lead(BaseModel):
@@ -134,7 +81,6 @@ class Lead(BaseModel):
         related_name="first_managed_leads",
     )
     source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
-    pipeline = models.ForeignKey("leads.Pipeline", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
     status = models.ForeignKey("leads.LeadStatus", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
 
     geo = models.CharField(max_length=2, blank=True, default="", db_index=True)
@@ -160,7 +106,6 @@ class Lead(BaseModel):
         on_delete=models.SET_NULL,
         related_name="manager_outcome_leads",
     )
-    transferred_to_ret_at = models.DateTimeField(null=True, blank=True, db_index=True)
     custom_fields = models.JSONField(default=dict, blank=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -227,60 +172,6 @@ class LeadDeposit(BaseModel):
 
     def __str__(self) -> str:
         return f"LeadDeposit {self.pk} lead={self.lead_id} type={self.type}"
-
-
-class LeadRetTransfer(BaseModel):
-    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="ret_transfers")
-    from_manager = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="ret_transfers_from",
-    )
-    to_ret = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="ret_transfers_to",
-    )
-    transferred_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="ret_transfers_created",
-    )
-    transferred_at = models.DateTimeField(default=timezone.now, db_index=True)
-    is_active = models.BooleanField(default=True, db_index=True)
-    reason = models.TextField(blank=True, default="")
-    rolled_back_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    rolled_back_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="ret_transfers_rolled_back",
-    )
-    rollback_reason = models.TextField(blank=True, default="")
-
-    class Meta:
-        db_table = "lead_ret_transfers"
-        indexes = [
-            models.Index(fields=["lead", "is_active"]),
-            models.Index(fields=["transferred_at"]),
-        ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["lead"],
-                condition=Q(is_active=True, is_deleted=False),
-                name="uniq_active_ret_transfer_per_lead",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"LeadRetTransfer {self.pk} lead={self.lead_id} active={self.is_active}"
 
 
 class LeadComment(BaseModel):
@@ -377,6 +268,10 @@ class LeadStatusIdempotencyEndpoint(models.TextChoices):
     BULK_UNASSIGN_MANAGER = "bulk_unassign_manager", "Bulk Unassign Manager"
 
 
+# Canonical alias for cleaner naming in app code.
+LeadIdempotencyEndpoint = LeadStatusIdempotencyEndpoint
+
+
 class LeadAuditLog(models.Model):
     id = models.BigAutoField(primary_key=True)
     lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="status_audit_logs")
@@ -423,13 +318,6 @@ class LeadAuditLog(models.Model):
     def __str__(self) -> str:
         return f"{self.event_type} lead={self.lead_id} at={self.created_at.isoformat()}"
 
-
-# Backward compatibility for existing imports.
-LeadStatusAuditEvent = LeadAuditEvent
-LeadStatusAuditSource = LeadAuditSource
-LeadStatusAuditLog = LeadAuditLog
-
-
 class LeadStatusIdempotencyKey(models.Model):
     id = models.BigAutoField(primary_key=True)
     actor_user = models.ForeignKey(
@@ -437,7 +325,7 @@ class LeadStatusIdempotencyKey(models.Model):
         on_delete=models.CASCADE,
         related_name="lead_status_idempotency_keys",
     )
-    endpoint = models.CharField(max_length=64, choices=LeadStatusIdempotencyEndpoint.choices)
+    endpoint = models.CharField(max_length=64, choices=LeadIdempotencyEndpoint.choices)
     key = models.CharField(max_length=128)
     request_hash = models.CharField(max_length=64)
     response_status = models.PositiveSmallIntegerField(default=0)
@@ -460,3 +348,7 @@ class LeadStatusIdempotencyKey(models.Model):
 
     def __str__(self) -> str:
         return f"{self.endpoint}:{self.actor_user_id}:{self.key}"
+
+
+# Canonical alias for cleaner naming in app code.
+LeadIdempotencyKey = LeadStatusIdempotencyKey

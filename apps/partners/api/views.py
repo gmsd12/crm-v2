@@ -133,7 +133,7 @@ class PartnerLeadViewSet(
         partner = self.request.partner_auth.partner
         return (
             Lead.objects.filter(partner=partner)
-            .select_related("source", "pipeline", "status")
+            .select_related("source", "status")
             .order_by("-received_at")
         )
 

@@ -14,14 +14,11 @@ from apps.leads.models import (
     LeadComment,
     LeadDeposit,
     LeadDuplicateAttempt,
-    LeadRetTransfer,
     LeadStatus,
-    LeadStatusAuditEvent,
-    LeadStatusAuditLog,
-    LeadStatusIdempotencyEndpoint,
-    LeadStatusIdempotencyKey,
-    LeadStatusTransition,
-    Pipeline,
+    LeadAuditEvent,
+    LeadAuditLog,
+    LeadIdempotencyEndpoint,
+    LeadIdempotencyKey,
 )
 from apps.partners.models import Partner, PartnerSource, PartnerToken
 
@@ -38,12 +35,11 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
     def _set_log_created_at(self, log_obj, dt_obj):
-        LeadStatusAuditLog.objects.filter(id=log_obj.id).update(created_at=dt_obj)
+        LeadAuditLog.objects.filter(id=log_obj.id).update(created_at=dt_obj)
 
     def test_teamleader_can_list_statuses(self):
         teamleader = User.objects.create_user(username="tl_status_list", password="pass12345", role=UserRole.TEAMLEADER)
-        pipeline = Pipeline.objects.create(code="default", name="Default", is_default=True)
-        LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         self._auth(teamleader)
 
         response = self.client.get("/api/v1/leads/statuses/")
@@ -51,11 +47,13 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 1)
 
-    def test_manager_and_ret_cannot_list_statuses(self):
+    def test_manager_can_list_statuses_but_ret_cannot(self):
         manager = User.objects.create_user(username="manager_status_list", password="pass12345", role=UserRole.MANAGER)
+        LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         self._auth(manager)
         manager_resp = self.client.get("/api/v1/leads/statuses/")
-        self.assertEqual(manager_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(manager_resp.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(manager_resp.data["results"]), 1)
 
         ret = User.objects.create_user(username="ret_status_list", password="pass12345", role=UserRole.RET)
         self._auth(ret)
@@ -64,13 +62,11 @@ class LeadStatusCatalogApiTests(APITestCase):
 
     def test_admin_can_create_and_soft_delete_status(self):
         admin = User.objects.create_user(username="admin_status_write", password="pass12345", role=UserRole.ADMIN)
-        pipeline = Pipeline.objects.create(code="p_soft", name="Pipeline Soft", is_default=True)
         self._auth(admin)
 
         create_resp = self.client.post(
             "/api/v1/leads/statuses/",
             {
-                "pipeline": str(pipeline.id),
                 "code": "CALLBACK",
                 "name": "Callback",
                 "order": 20,
@@ -90,15 +86,13 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_admin_cannot_deactivate_status_if_used_by_leads(self):
         admin = User.objects.create_user(username="admin_status_deactivate", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Status Used", code="partner-status-used")
-        pipeline = Pipeline.objects.create(code="p_used_deactivate", name="Pipeline Used Deactivate", is_default=True)
         status_obj = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="IN_USE",
             name="In Use",
             is_default_for_new_leads=True,
             is_active=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
+        Lead.objects.create(partner=partner, status=status_obj, custom_fields={})
         self._auth(admin)
 
         response = self.client.patch(
@@ -115,15 +109,13 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_admin_cannot_soft_delete_status_if_used_by_leads(self):
         admin = User.objects.create_user(username="admin_status_soft_used", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Status Soft Used", code="partner-status-soft-used")
-        pipeline = Pipeline.objects.create(code="p_used_soft", name="Pipeline Used Soft", is_default=True)
         status_obj = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="SOFT_USED",
             name="Soft Used",
             is_default_for_new_leads=True,
             is_active=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
+        Lead.objects.create(partner=partner, status=status_obj, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(f"/api/v1/leads/statuses/{status_obj.id}/soft_delete/", {}, format="json")
@@ -134,9 +126,7 @@ class LeadStatusCatalogApiTests(APITestCase):
 
     def test_admin_cannot_hard_delete_status(self):
         admin = User.objects.create_user(username="admin_status_delete", password="pass12345", role=UserRole.ADMIN)
-        pipeline = Pipeline.objects.create(code="p_admin_del", name="Pipeline Admin Delete", is_default=True)
         status_obj = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="VERIFY",
             name="Verify",
             is_default_for_new_leads=True,
@@ -156,9 +146,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_staff=True,
             is_superuser=True,
         )
-        pipeline = Pipeline.objects.create(code="p_su_del", name="Pipeline Super Delete", is_default=True)
         status_obj = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="VERIFY2",
             name="Verify 2",
             is_default_for_new_leads=True,
@@ -179,14 +167,12 @@ class LeadStatusCatalogApiTests(APITestCase):
             is_superuser=True,
         )
         partner = Partner.objects.create(name="Partner Status Hard Used", code="partner-status-hard-used")
-        pipeline = Pipeline.objects.create(code="p_su_del_used", name="Pipeline Super Delete Used", is_default=True)
         status_obj = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="HARD_USED",
             name="Hard Used",
             is_default_for_new_leads=True,
         )
-        Lead.objects.create(partner=partner, pipeline=pipeline, status=status_obj, custom_fields={})
+        Lead.objects.create(partner=partner, status=status_obj, custom_fields={})
         self._auth(superuser)
 
         response = self.client.delete(f"/api/v1/leads/statuses/{status_obj.id}/")
@@ -195,38 +181,13 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.data["error"]["code"], "validation_error")
         self.assertTrue(LeadStatus.all_objects.filter(id=status_obj.id).exists())
 
-    def test_transition_rejects_cross_pipeline_statuses(self):
-        admin = User.objects.create_user(username="admin_transition", password="pass12345", role=UserRole.ADMIN)
-        p1 = Pipeline.objects.create(code="p1", name="Pipeline 1", is_default=True)
-        p2 = Pipeline.objects.create(code="p2", name="Pipeline 2")
-        s1 = LeadStatus.objects.create(pipeline=p1, code="NEW", name="New", is_default_for_new_leads=True)
-        s2 = LeadStatus.objects.create(pipeline=p2, code="CALL", name="Call")
-        self._auth(admin)
-
-        response = self.client.post(
-            "/api/v1/leads/status-transitions/",
-            {
-                "pipeline": str(p1.id),
-                "from_status": str(s1.id),
-                "to_status": str(s2.id),
-                "is_active": True,
-                "requires_comment": False,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["error"]["code"], "validation_error")
-
     def test_audit_log_records_status_create_update_and_soft_delete(self):
         admin = User.objects.create_user(username="admin_audit", password="pass12345", role=UserRole.ADMIN)
-        pipeline = Pipeline.objects.create(code="p_audit", name="Pipeline Audit", is_default=True)
         self._auth(admin)
 
         create_resp = self.client.post(
             "/api/v1/leads/statuses/",
             {
-                "pipeline": str(pipeline.id),
                 "code": "NEW",
                 "name": "New",
                 "order": 10,
@@ -250,29 +211,21 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(soft_delete_resp.status_code, status.HTTP_204_NO_CONTENT)
 
         events = list(
-            LeadStatusAuditLog.objects.filter(to_status_id=status_id).values_list("event_type", flat=True)
+            LeadAuditLog.objects.filter(to_status_id=status_id).values_list("event_type", flat=True)
         ) + list(
-            LeadStatusAuditLog.objects.filter(from_status_id=status_id).values_list("event_type", flat=True)
+            LeadAuditLog.objects.filter(from_status_id=status_id).values_list("event_type", flat=True)
         )
 
-        self.assertIn(LeadStatusAuditEvent.STATUS_CREATED, events)
-        self.assertIn(LeadStatusAuditEvent.STATUS_UPDATED, events)
-        self.assertIn(LeadStatusAuditEvent.STATUS_DELETED_SOFT, events)
+        self.assertIn(LeadAuditEvent.STATUS_CREATED, events)
+        self.assertIn(LeadAuditEvent.STATUS_UPDATED, events)
+        self.assertIn(LeadAuditEvent.STATUS_DELETED_SOFT, events)
 
     def test_admin_can_change_lead_status_with_valid_transition_and_audit(self):
         admin = User.objects.create_user(username="admin_change_status", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Change", code="partner-change")
-        pipeline = Pipeline.objects.create(code="wf_change", name="Workflow Change", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"x": 1})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={"x": 1})
         self._auth(admin)
 
         response = self.client.post(
@@ -286,8 +239,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.status_id, status_work.id)
 
-        audit = LeadStatusAuditLog.objects.filter(
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+        audit = LeadAuditLog.objects.filter(
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             lead=lead,
             from_status=status_new,
             to_status=status_work,
@@ -295,13 +248,12 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertIsNotNone(audit)
         self.assertEqual(audit.reason, "accepted to work")
 
-    def test_change_lead_status_rejects_invalid_transition(self):
+    def test_change_lead_status_allows_direct_change_without_transition(self):
         admin = User.objects.create_user(username="admin_invalid_transition", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Invalid", code="partner-invalid-transition")
-        pipeline = Pipeline.objects.create(code="wf_invalid", name="Workflow Invalid", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_won = LeadStatus.objects.create(pipeline=pipeline, code="WON", name="Won", is_terminal=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(code="WON", name="Won", is_terminal=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -310,25 +262,16 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         lead.refresh_from_db()
-        self.assertEqual(lead.status_id, status_new.id)
+        self.assertEqual(lead.status_id, status_won.id)
 
-    def test_change_lead_status_requires_comment_for_transition(self):
+    def test_change_lead_status_does_not_require_comment(self):
         admin = User.objects.create_user(username="admin_requires_comment", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Comment", code="partner-comment")
-        pipeline = Pipeline.objects.create(code="wf_comment", name="Workflow Comment", is_default=True)
-        status_lost = LeadStatus.objects.create(pipeline=pipeline, code="LOST", name="Lost", is_default_for_new_leads=True)
-        status_reopened = LeadStatus.objects.create(pipeline=pipeline, code="REOPEN", name="Reopened")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_lost,
-            to_status=status_reopened,
-            is_active=True,
-            requires_comment=True,
-        )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
+        status_lost = LeadStatus.objects.create(code="LOST", name="Lost", is_default_for_new_leads=True)
+        status_reopened = LeadStatus.objects.create(code="REOPEN", name="Reopened")
+        lead = Lead.objects.create(partner=partner, status=status_lost, custom_fields={})
         self._auth(admin)
 
         no_reason = self.client.post(
@@ -336,32 +279,23 @@ class LeadStatusCatalogApiTests(APITestCase):
             {"to_status": str(status_reopened.id)},
             format="json",
         )
-        self.assertEqual(no_reason.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(no_reason.data["error"]["code"], "validation_error")
+        self.assertEqual(no_reason.status_code, status.HTTP_200_OK)
 
         with_reason = self.client.post(
             f"/api/v1/leads/records/{lead.id}/change-status/",
             {"to_status": str(status_reopened.id), "reason": "lead returned with new budget"},
             format="json",
         )
-        self.assertEqual(with_reason.status_code, status.HTTP_200_OK)
+        self.assertEqual(with_reason.status_code, status.HTTP_400_BAD_REQUEST)
         lead.refresh_from_db()
         self.assertEqual(lead.status_id, status_reopened.id)
 
     def test_manager_can_change_own_lead_status(self):
         manager = User.objects.create_user(username="manager_change_status", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Manager Change", code="partner-manager-change")
-        pipeline = Pipeline.objects.create(code="wf_manager_change", name="Workflow Manager Change", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=manager, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -378,33 +312,22 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_status_won_attrib", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_status_won_attrib", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Won Attribution", code="partner-won-attrib")
-        pipeline = Pipeline.objects.create(code="wf_won_attrib", name="Workflow Won Attribution", is_default=True)
         status_work = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WORK",
             name="Work",
             is_default_for_new_leads=True,
         )
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
             conversion_bucket=LeadStatus.ConversionBucket.WON,
-        )
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_work,
-            to_status=status_won,
-            is_active=True,
-            requires_comment=False,
         )
         lead = Lead.objects.create(
             partner=partner,
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_work,
             custom_fields={},
         )
@@ -426,17 +349,9 @@ class LeadStatusCatalogApiTests(APITestCase):
         owner = User.objects.create_user(username="manager_change_owner", password="pass12345", role=UserRole.MANAGER)
         manager = User.objects.create_user(username="manager_change_other", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Manager Deny", code="partner-manager-deny")
-        pipeline = Pipeline.objects.create(code="wf_manager_deny", name="Workflow Manager Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=owner, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -453,17 +368,9 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_status_manager_ok", password="pass12345", role=UserRole.TEAMLEADER)
         manager_owner = User.objects.create_user(username="manager_status_owner", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner TL Status Manager", code="partner-tl-status-manager")
-        pipeline = Pipeline.objects.create(code="wf_tl_status_manager", name="Workflow TL Status Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=manager_owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=manager_owner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -484,9 +391,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Single", code="partner-assign-single")
-        pipeline = Pipeline.objects.create(code="wf_assign_single", name="Workflow Assign Single", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -501,7 +407,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.first_manager_id, manager_target.id)
         self.assertIsNotNone(lead.first_assigned_at)
         self.assertEqual(response.data["manager"]["id"], str(manager_target.id))
-        audit = LeadStatusAuditLog.objects.get(lead=lead, event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED)
+        audit = LeadAuditLog.objects.get(lead=lead, event_type=LeadAuditEvent.MANAGER_ASSIGNED)
         self.assertEqual(audit.actor_user_id, teamleader.id)
         self.assertEqual(audit.reason, "initial distribution")
         self.assertEqual(audit.payload_before["manager"], None)
@@ -519,9 +425,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Single Deny", code="partner-assign-single-deny")
-        pipeline = Pipeline.objects.create(code="wf_assign_single_deny", name="Workflow Assign Single Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(manager_actor)
 
         response = self.client.post(
@@ -540,9 +445,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_old = User.objects.create_user(username="manager_old_single", password="pass12345", role=UserRole.MANAGER)
         manager_new = User.objects.create_user(username="manager_new_single", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Reassign Single", code="partner-reassign-single")
-        pipeline = Pipeline.objects.create(code="wf_reassign_single", name="Workflow Reassign Single", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_old, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_old, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -554,7 +458,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         lead.refresh_from_db()
         self.assertEqual(lead.manager_id, manager_new.id)
-        audit = LeadStatusAuditLog.objects.get(lead=lead, event_type=LeadStatusAuditEvent.MANAGER_REASSIGNED)
+        audit = LeadAuditLog.objects.get(lead=lead, event_type=LeadAuditEvent.MANAGER_REASSIGNED)
         self.assertEqual(audit.reason, "rebalance")
         self.assertEqual(audit.payload_before["manager"]["id"], str(manager_old.id))
         self.assertEqual(audit.payload_after["manager"]["id"], str(manager_new.id))
@@ -567,10 +471,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.RET,
         )
         partner = Partner.objects.create(name="Partner Assign RET", code="partner-assign-ret")
-        pipeline = Pipeline.objects.create(code="wf_assign_ret", name="Workflow Assign RET", is_default=True)
-        LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -579,7 +481,6 @@ class LeadStatusCatalogApiTests(APITestCase):
         )
         lead = Lead.objects.create(
             partner=partner,
-            pipeline=pipeline,
             status=status_won,
             manager_outcome=Lead.StageOutcome.WON,
             manager_outcome_at=timezone.make_aware(datetime(2026, 1, 10, 10, 0, 0)),
@@ -603,9 +504,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_assign_ret_guard", password="pass12345", role=UserRole.ADMIN)
         ret_target = User.objects.create_user(username="ret_target_guard", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Assign RET Guard", code="partner-assign-ret-guard")
-        pipeline = Pipeline.objects.create(code="wf_assign_ret_guard", name="Workflow Assign RET Guard", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -623,22 +523,20 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager = User.objects.create_user(username="manager_close_won", password="pass12345", role=UserRole.MANAGER)
         ret_user = User.objects.create_user(username="ret_close_won", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Close Won", code="partner-close-won")
-        pipeline = Pipeline.objects.create(code="wf_close_won", name="Workflow Close Won", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
             is_valid=True,
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
-        lead = Lead.objects.create(partner=partner, manager=manager, pipeline=pipeline, status=status_new, phone="+19991001", custom_fields={})
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+19991001", custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
             f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
-            {"ret_manager": ret_user.id, "amount": "150.00", "reason": "won and handover"},
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "amount": "150.00", "reason": "won and handover"},
             format="json",
         )
 
@@ -647,25 +545,142 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.manager_id, ret_user.id)
         self.assertEqual(lead.status_id, status_won.id)
         self.assertEqual(lead.manager_outcome, Lead.StageOutcome.WON)
-        self.assertIsNotNone(lead.transferred_to_ret_at)
         dep = LeadDeposit.objects.get(lead=lead)
         self.assertEqual(dep.type, LeadDeposit.Type.FTD)
         self.assertEqual(str(dep.amount), "150.00")
-        transfer = LeadRetTransfer.objects.get(lead=lead, is_active=True)
-        self.assertEqual(transfer.from_manager_id, manager.id)
-        self.assertEqual(transfer.to_ret_id, ret_user.id)
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(lead=lead, event_type=LeadStatusAuditEvent.RET_TRANSFERRED).exists()
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.RET_TRANSFERRED).exists()
         )
+
+    def test_manager_can_close_won_transfer_with_existing_ftd(self):
+        manager = User.objects.create_user(username="manager_close_won_existing_ftd", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_close_won_existing_ftd", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Close Won Existing FTD", code="partner-close-won-existing-ftd")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON",
+            name="Won",
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            status=status_new,
+            phone="+19991009",
+            custom_fields={},
+        )
+        existing_ftd = LeadDeposit.objects.create(
+            lead=lead,
+            creator=manager,
+            amount="111.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        self._auth(manager)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "reason": "reuse existing ftd"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, ret_user.id)
+        self.assertEqual(LeadDeposit.objects.filter(lead=lead, type=LeadDeposit.Type.FTD).count(), 1)
+        self.assertEqual(str(LeadDeposit.objects.get(id=existing_ftd.id).amount), str(existing_ftd.amount))
+
+    def test_manager_can_handoff_to_admin_and_create_comment_in_same_request(self):
+        manager = User.objects.create_user(username="manager_handoff_admin", password="pass12345", role=UserRole.MANAGER)
+        admin_target = User.objects.create_user(username="admin_handoff_target", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Handoff To Admin", code="partner-handoff-admin")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON_HANDOFF_ADMIN",
+            name="Won Handoff Admin",
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+19991019", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {
+                "ret_manager": admin_target.id,
+                "to_status": status_won.id,
+                "amount": "175.00",
+                "reason": "handoff to admin queue",
+                "comment": "Client closed, move to admin for RET routing",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, admin_target.id)
+        self.assertEqual(lead.manager_outcome, Lead.StageOutcome.WON)
+        self.assertEqual(lead.manager_outcome_by_id, manager.id)
+        self.assertTrue(
+            LeadComment.objects.filter(
+                lead=lead,
+                author=manager,
+                body="Client closed, move to admin for RET routing",
+            ).exists()
+        )
+        self.assertTrue(
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.COMMENT_CREATED).exists()
+        )
+
+    def test_admin_can_rollback_transfer_when_lead_is_on_admin(self):
+        admin_actor = User.objects.create_user(username="admin_rollback_from_admin", password="pass12345", role=UserRole.ADMIN)
+        admin_target = User.objects.create_user(username="admin_target_rollback", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_before_admin_rollback", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Rollback From Admin", code="partner-rollback-from-admin")
+        status_won = LeadStatus.objects.create(
+            code="WON_ROLLBACK_ADMIN",
+            name="Won Rollback Admin",
+            is_default_for_new_leads=True,
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            status=status_won,
+            phone="+19991020",
+            custom_fields={},
+        )
+        self._auth(admin_actor)
+        transfer_resp = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {"ret_manager": admin_target.id, "to_status": status_won.id, "amount": "200.00", "reason": "to admin"},
+            format="json",
+        )
+        self.assertEqual(transfer_resp.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, admin_target.id)
+
+        rollback_resp = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/rollback-ret-transfer/",
+            {"reason": "wrong handoff destination"},
+            format="json",
+        )
+
+        self.assertEqual(rollback_resp.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, manager.id)
+        self.assertEqual(lead.manager_outcome, Lead.StageOutcome.PENDING)
 
     def test_admin_can_rollback_ret_transfer_and_reverse_ftd(self):
         admin = User.objects.create_user(username="admin_rollback_transfer", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_rollback_transfer", password="pass12345", role=UserRole.MANAGER)
         ret_user = User.objects.create_user(username="ret_rollback_transfer", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Rollback Transfer", code="partner-rollback-transfer")
-        pipeline = Pipeline.objects.create(code="wf_rollback_transfer", name="Workflow Rollback Transfer", is_default=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_default_for_new_leads=True,
@@ -676,7 +691,6 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead = Lead.objects.create(
             partner=partner,
             manager=manager,
-            pipeline=pipeline,
             status=status_won,
             phone="+19991002",
             custom_fields={},
@@ -684,7 +698,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self._auth(admin)
         self.client.post(
             f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
-            {"ret_manager": ret_user.id, "amount": "200.00", "reason": "close and handover"},
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "amount": "200.00", "reason": "close and handover"},
             format="json",
         )
 
@@ -698,17 +712,13 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.manager_id, manager.id)
         self.assertEqual(lead.manager_outcome, Lead.StageOutcome.PENDING)
-        self.assertIsNone(lead.transferred_to_ret_at)
         ftd = LeadDeposit.all_objects.get(lead=lead, type=LeadDeposit.Type.FTD)
         self.assertTrue(ftd.is_deleted)
-        transfer = LeadRetTransfer.all_objects.get(lead=lead)
-        self.assertFalse(transfer.is_active)
-        self.assertIsNotNone(transfer.rolled_back_at)
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(lead=lead, event_type=LeadStatusAuditEvent.DEPOSIT_REVERSED).exists()
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.DEPOSIT_REVERSED).exists()
         )
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(lead=lead, event_type=LeadStatusAuditEvent.RET_TRANSFER_ROLLBACK).exists()
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.RET_TRANSFER_ROLLBACK).exists()
         )
 
     def test_rollback_transfer_is_blocked_if_non_ftd_deposit_exists(self):
@@ -716,9 +726,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager = User.objects.create_user(username="manager_rollback_blocked", password="pass12345", role=UserRole.MANAGER)
         ret_user = User.objects.create_user(username="ret_rollback_blocked", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Rollback Blocked", code="partner-rollback-blocked")
-        pipeline = Pipeline.objects.create(code="wf_rollback_blocked", name="Workflow Rollback Blocked", is_default=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_default_for_new_leads=True,
@@ -729,7 +737,6 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead = Lead.objects.create(
             partner=partner,
             manager=manager,
-            pipeline=pipeline,
             status=status_won,
             phone="+19991003",
             custom_fields={},
@@ -737,7 +744,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self._auth(admin)
         self.client.post(
             f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
-            {"ret_manager": ret_user.id, "amount": "200.00"},
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "amount": "200.00", "reason": "close and handover"},
             format="json",
         )
         LeadDeposit.objects.create(lead=lead, creator=ret_user, amount="50.00", type=LeadDeposit.Type.RELOAD)
@@ -756,9 +763,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_assign_admin", password="pass12345", role=UserRole.TEAMLEADER)
         admin_target = User.objects.create_user(username="admin_target_single", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Assign Admin", code="partner-assign-admin")
-        pipeline = Pipeline.objects.create(code="wf_assign_admin", name="Workflow Assign Admin", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -778,9 +784,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_b = User.objects.create_user(username="manager_first_b", password="pass12345", role=UserRole.MANAGER)
         ret_user = User.objects.create_user(username="ret_first_manager", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner First Manager", code="partner-first-manager")
-        pipeline = Pipeline.objects.create(code="wf_first_manager", name="Workflow First Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         self.client.post(
@@ -813,14 +818,12 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_change_first_a", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_change_first_b", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Change First Manager", code="partner-change-first-manager")
-        pipeline = Pipeline.objects.create(code="wf_change_first_mgr", name="Workflow Change First Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         lead = Lead.objects.create(
             partner=partner,
             manager=manager_a,
             first_manager=manager_a,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 10, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_new,
             custom_fields={},
         )
@@ -840,9 +843,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager = User.objects.create_user(username="manager_change_first_deny", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_change_first_deny_b", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Change First Deny", code="partner-change-first-deny")
-        pipeline = Pipeline.objects.create(code="wf_change_first_deny", name="Workflow Change First Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -861,10 +863,9 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Bulk", code="partner-assign-bulk")
-        pipeline = Pipeline.objects.create(code="wf_assign_bulk", name="Workflow Assign Bulk", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_1 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -887,8 +888,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead_1.manager_id, manager_target.id)
         self.assertEqual(lead_2.manager_id, manager_target.id)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.MANAGER_ASSIGNED,
                 lead_id__in=[lead_1.id, lead_2.id],
                 reason="bulk distribution",
             ).count(),
@@ -903,9 +904,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Bulk Partial", code="partner-assign-bulk-partial")
-        pipeline = Pipeline.objects.create(code="wf_assign_bulk_partial", name="Workflow Assign Bulk Partial", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         unknown_id = 999999991
         self._auth(admin)
 
@@ -927,8 +927,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.manager_id, manager_target.id)
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.MANAGER_ASSIGNED,
                 lead=lead,
                 reason="partial distribution",
             ).exists()
@@ -942,9 +942,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Bulk Deny", code="partner-assign-bulk-deny")
-        pipeline = Pipeline.objects.create(code="wf_assign_bulk_deny", name="Workflow Assign Bulk Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(ret)
 
         response = self.client.post(
@@ -969,9 +968,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Unassign Single", code="partner-unassign-single")
-        pipeline = Pipeline.objects.create(code="wf_unassign_single", name="Workflow Unassign Single", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -984,7 +982,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertIsNone(lead.manager_id)
         self.assertIsNone(response.data["manager"])
-        audit = LeadStatusAuditLog.objects.get(lead=lead, event_type=LeadStatusAuditEvent.MANAGER_UNASSIGNED)
+        audit = LeadAuditLog.objects.get(lead=lead, event_type=LeadAuditEvent.MANAGER_UNASSIGNED)
         self.assertEqual(audit.actor_user_id, admin.id)
         self.assertEqual(audit.reason, "manager on vacation")
         self.assertEqual(audit.payload_before["manager"]["id"], str(manager_target.id))
@@ -998,9 +996,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner TL Unassign", code="partner-tl-unassign")
-        pipeline = Pipeline.objects.create(code="wf_tl_unassign", name="Workflow TL Unassign", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -1018,9 +1015,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_unassign_ret", password="pass12345", role=UserRole.TEAMLEADER)
         ret_owner = User.objects.create_user(username="ret_unassign_owner", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner TL Unassign RET", code="partner-tl-unassign-ret")
-        pipeline = Pipeline.objects.create(code="wf_tl_unassign_ret", name="Workflow TL Unassign RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=ret_owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=ret_owner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -1042,10 +1038,9 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Unassign Bulk", code="partner-unassign-bulk")
-        pipeline = Pipeline.objects.create(code="wf_unassign_bulk", name="Workflow Unassign Bulk", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1066,8 +1061,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertIsNone(lead_1.manager_id)
         self.assertIsNone(lead_2.manager_id)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.MANAGER_UNASSIGNED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.MANAGER_UNASSIGNED,
                 lead_id__in=[lead_1.id, lead_2.id],
                 reason="queue reset",
             ).count(),
@@ -1082,9 +1077,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Unassign Bulk Partial", code="partner-unassign-bulk-partial")
-        pipeline = Pipeline.objects.create(code="wf_unassign_bulk_partial", name="Workflow Unassign Bulk Partial", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         unknown_id = 999999992
         self._auth(admin)
 
@@ -1105,8 +1099,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertIsNone(lead.manager_id)
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.MANAGER_UNASSIGNED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.MANAGER_UNASSIGNED,
                 lead=lead,
                 reason="partial unassign",
             ).exists()
@@ -1124,9 +1118,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Unassign Bulk Deny", code="partner-unassign-bulk-deny")
-        pipeline = Pipeline.objects.create(code="wf_unassign_bulk_deny", name="Workflow Unassign Bulk Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(manager_actor)
 
         response = self.client.post(
@@ -1150,9 +1143,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Idem", code="partner-assign-idem")
-        pipeline = Pipeline.objects.create(code="wf_assign_idem", name="Workflow Assign Idem", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "assign-manager-key-1"}
@@ -1166,16 +1158,16 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.manager_id, manager_target.id)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_ASSIGNED,
             ).count(),
             1,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
-                endpoint=LeadStatusIdempotencyEndpoint.ASSIGN_MANAGER,
+                endpoint=LeadIdempotencyEndpoint.ASSIGN_MANAGER,
                 key="assign-manager-key-1",
             ).count(),
             1,
@@ -1194,9 +1186,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Assign Idem Diff", code="partner-assign-idem-diff")
-        pipeline = Pipeline.objects.create(code="wf_assign_idem_diff", name="Workflow Assign Idem Diff", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "assign-manager-key-2"}
@@ -1227,10 +1218,9 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Bulk Assign Idem", code="partner-bulk-assign-idem")
-        pipeline = Pipeline.objects.create(code="wf_bulk_assign_idem", name="Workflow Bulk Assign Idem", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_1 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-assign-manager-key-1"}
@@ -1245,16 +1235,16 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data, second.data)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead_id__in=[lead_1.id, lead_2.id],
-                event_type=LeadStatusAuditEvent.MANAGER_ASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_ASSIGNED,
             ).count(),
             2,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
-                endpoint=LeadStatusIdempotencyEndpoint.BULK_ASSIGN_MANAGER,
+                endpoint=LeadIdempotencyEndpoint.BULK_ASSIGN_MANAGER,
                 key="bulk-assign-manager-key-1",
             ).count(),
             1,
@@ -1268,9 +1258,8 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Unassign Idem", code="partner-unassign-idem")
-        pipeline = Pipeline.objects.create(code="wf_unassign_idem", name="Workflow Unassign Idem", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "unassign-manager-key-1"}
@@ -1283,16 +1272,16 @@ class LeadStatusCatalogApiTests(APITestCase):
         lead.refresh_from_db()
         self.assertIsNone(lead.manager_id)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=lead,
-                event_type=LeadStatusAuditEvent.MANAGER_UNASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_UNASSIGNED,
             ).count(),
             1,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
-                endpoint=LeadStatusIdempotencyEndpoint.UNASSIGN_MANAGER,
+                endpoint=LeadIdempotencyEndpoint.UNASSIGN_MANAGER,
                 key="unassign-manager-key-1",
             ).count(),
             1,
@@ -1306,14 +1295,9 @@ class LeadStatusCatalogApiTests(APITestCase):
             role=UserRole.MANAGER,
         )
         partner = Partner.objects.create(name="Partner Bulk Unassign Idem", code="partner-bulk-unassign-idem")
-        pipeline = Pipeline.objects.create(
-            code="wf_bulk_unassign_idem",
-            name="Workflow Bulk Unassign Idem",
-            is_default=True,
-        )
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_1 = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, manager=manager_target, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-unassign-manager-key-1"}
@@ -1325,16 +1309,16 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data, second.data)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead_id__in=[lead_1.id, lead_2.id],
-                event_type=LeadStatusAuditEvent.MANAGER_UNASSIGNED,
+                event_type=LeadAuditEvent.MANAGER_UNASSIGNED,
             ).count(),
             2,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
-                endpoint=LeadStatusIdempotencyEndpoint.BULK_UNASSIGN_MANAGER,
+                endpoint=LeadIdempotencyEndpoint.BULK_UNASSIGN_MANAGER,
                 key="bulk-unassign-manager-key-1",
             ).count(),
             1,
@@ -1343,17 +1327,9 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_change_status_is_idempotent_with_same_key(self):
         admin = User.objects.create_user(username="admin_change_idem", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Change Idem", code="partner-change-idem")
-        pipeline = Pipeline.objects.create(code="wf_change_idem", name="Workflow Change Idem", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "change-status-key-1"}
@@ -1374,15 +1350,15 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data, second.data)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead=lead,
                 to_status=status_work,
             ).count(),
             1,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
                 endpoint="change_status",
                 key="change-status-key-1",
@@ -1393,25 +1369,10 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_change_status_rejects_same_idempotency_key_with_different_payload(self):
         admin = User.objects.create_user(username="admin_change_idem_diff", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Change Idem Diff", code="partner-change-idem-diff")
-        pipeline = Pipeline.objects.create(code="wf_change_idem_diff", name="Workflow Change Idem Diff", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        status_lost = LeadStatus.objects.create(pipeline=pipeline, code="LOST", name="Lost")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_lost,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        status_lost = LeadStatus.objects.create(code="LOST", name="Lost")
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "change-status-key-2"}
@@ -1432,27 +1393,18 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(second.data["error"]["code"], "validation_error")
 
-    def test_change_status_revalidates_after_stale_prefetch(self):
+    def test_change_status_uses_fresh_row_after_stale_prefetch(self):
         from unittest.mock import patch
 
         admin = User.objects.create_user(username="admin_stale_check", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Stale", code="partner-stale")
-        pipeline = Pipeline.objects.create(code="wf_stale", name="Workflow Stale", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        status_won = LeadStatus.objects.create(pipeline=pipeline, code="WON", name="Won")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_won,
-            is_active=True,
-            requires_comment=False,
-        )
-        stale_lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        stale_snapshot = Lead.objects.select_related("status", "pipeline").get(id=stale_lead.id)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        status_won = LeadStatus.objects.create(code="WON", name="Won")
+        stale_lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        stale_snapshot = Lead.objects.select_related("status").get(id=stale_lead.id)
         stale_lead.status = status_work
-        stale_lead.pipeline = pipeline
-        stale_lead.save(update_fields=["status", "pipeline", "updated_at"])
+        stale_lead.save(update_fields=["status", "updated_at"])
         self._auth(admin)
 
         with patch("apps.leads.api.views.LeadViewSet.get_object", return_value=stale_snapshot):
@@ -1462,13 +1414,12 @@ class LeadStatusCatalogApiTests(APITestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         stale_lead.refresh_from_db()
-        self.assertEqual(stale_lead.status_id, status_work.id)
-        self.assertFalse(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+        self.assertEqual(stale_lead.status_id, status_won.id)
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead=stale_lead,
                 to_status=status_won,
             ).exists()
@@ -1477,18 +1428,10 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_admin_can_bulk_change_lead_status_and_write_audit(self):
         admin = User.objects.create_user(username="admin_bulk_status", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk", code="partner-bulk")
-        pipeline = Pipeline.objects.create(code="wf_bulk", name="Workflow Bulk", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"n": 1})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={"n": 2})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead_1 = Lead.objects.create(partner=partner, status=status_new, custom_fields={"n": 1})
+        lead_2 = Lead.objects.create(partner=partner, status=status_new, custom_fields={"n": 2})
         self._auth(admin)
 
         response = self.client.post(
@@ -1510,8 +1453,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead_1.status_id, status_work.id)
         self.assertEqual(lead_2.status_id, status_work.id)
 
-        audits = LeadStatusAuditLog.objects.filter(
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+        audits = LeadAuditLog.objects.filter(
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             to_status=status_work,
             lead_id__in=[lead_1.id, lead_2.id],
         )
@@ -1521,18 +1464,10 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_bulk_change_status_is_idempotent_with_same_key(self):
         admin = User.objects.create_user(username="admin_bulk_idem", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Idem", code="partner-bulk-idem")
-        pipeline = Pipeline.objects.create(code="wf_bulk_idem", name="Workflow Bulk Idem", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead_1 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         headers = {"HTTP_IDEMPOTENCY_KEY": "bulk-status-key-1"}
@@ -1548,15 +1483,15 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data, second.data)
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead_id__in=[lead_1.id, lead_2.id],
                 to_status=status_work,
             ).count(),
             2,
         )
         self.assertEqual(
-            LeadStatusIdempotencyKey.objects.filter(
+            LeadIdempotencyKey.objects.filter(
                 actor_user=admin,
                 endpoint="bulk_change_status",
                 key="bulk-status-key-1",
@@ -1564,22 +1499,14 @@ class LeadStatusCatalogApiTests(APITestCase):
             1,
         )
 
-    def test_bulk_change_status_rejects_batch_with_invalid_transition_and_keeps_all(self):
+    def test_bulk_change_status_updates_all_without_transition_checks(self):
         admin = User.objects.create_user(username="admin_bulk_invalid", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Invalid", code="partner-bulk-invalid")
-        pipeline = Pipeline.objects.create(code="wf_bulk_invalid", name="Workflow Bulk Invalid", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        status_lost = LeadStatus.objects.create(pipeline=pipeline, code="LOST", name="Lost")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        status_lost = LeadStatus.objects.create(code="LOST", name="Lost")
+        lead_allowed = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_blocked = Lead.objects.create(partner=partner, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1592,36 +1519,28 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated_count"], 2)
 
         lead_allowed.refresh_from_db()
         lead_blocked.refresh_from_db()
-        self.assertEqual(lead_allowed.status_id, status_new.id)
-        self.assertEqual(lead_blocked.status_id, status_lost.id)
-        self.assertFalse(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+        self.assertEqual(lead_allowed.status_id, status_work.id)
+        self.assertEqual(lead_blocked.status_id, status_work.id)
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead_id__in=[lead_allowed.id, lead_blocked.id],
             ).exists()
         )
 
-    def test_bulk_change_status_partial_success_updates_valid_and_reports_errors(self):
+    def test_bulk_change_status_partial_success_keeps_unknown_only(self):
         admin = User.objects.create_user(username="admin_bulk_partial", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Partial", code="partner-bulk-partial")
-        pipeline = Pipeline.objects.create(code="wf_bulk_partial", name="Workflow Bulk Partial", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        status_lost = LeadStatus.objects.create(pipeline=pipeline, code="LOST", name="Lost")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead_allowed = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_blocked = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        status_lost = LeadStatus.objects.create(code="LOST", name="Lost")
+        lead_allowed = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_blocked = Lead.objects.create(partner=partner, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1636,26 +1555,25 @@ class LeadStatusCatalogApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["updated_count"], 1)
-        self.assertEqual(response.data["failed_count"], 1)
-        self.assertEqual(response.data["updated_ids"], [str(lead_allowed.id)])
-        self.assertEqual(response.data["failed"][str(lead_blocked.id)], "Transition is not allowed")
+        self.assertEqual(response.data["updated_count"], 2)
+        self.assertEqual(response.data["failed_count"], 0)
+        self.assertCountEqual(response.data["updated_ids"], [str(lead_allowed.id), str(lead_blocked.id)])
 
         lead_allowed.refresh_from_db()
         lead_blocked.refresh_from_db()
         self.assertEqual(lead_allowed.status_id, status_work.id)
-        self.assertEqual(lead_blocked.status_id, status_lost.id)
+        self.assertEqual(lead_blocked.status_id, status_work.id)
 
         self.assertEqual(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead_id=lead_allowed.id,
             ).count(),
             1,
         )
-        self.assertFalse(
-            LeadStatusAuditLog.objects.filter(
-                event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.STATUS_CHANGED,
                 lead_id=lead_blocked.id,
             ).exists()
         )
@@ -1663,17 +1581,9 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_bulk_change_status_partial_success_reports_unknown_lead_id(self):
         admin = User.objects.create_user(username="admin_bulk_partial_unknown", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Partial Unknown", code="partner-bulk-partial-unknown")
-        pipeline = Pipeline.objects.create(code="wf_bulk_partial_unknown", name="Workflow Bulk Partial Unknown", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         unknown_id = 999999993
         self._auth(admin)
 
@@ -1701,18 +1611,10 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_bulk_change_status_rejects_when_limit_exceeded(self):
         admin = User.objects.create_user(username="admin_bulk_limit", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Limit", code="partner-bulk-limit")
-        pipeline = Pipeline.objects.create(code="wf_bulk_limit", name="Workflow Bulk Limit", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead_1 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -1734,21 +1636,13 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead_1.status_id, status_new.id)
         self.assertEqual(lead_2.status_id, status_new.id)
 
-    def test_bulk_change_status_requires_comment_for_transition(self):
+    def test_bulk_change_status_does_not_require_comment(self):
         admin = User.objects.create_user(username="admin_bulk_comment", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Bulk Comment", code="partner-bulk-comment")
-        pipeline = Pipeline.objects.create(code="wf_bulk_comment", name="Workflow Bulk Comment", is_default=True)
-        status_lost = LeadStatus.objects.create(pipeline=pipeline, code="LOST", name="Lost", is_default_for_new_leads=True)
-        status_reopen = LeadStatus.objects.create(pipeline=pipeline, code="REOPEN", name="Reopen")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_lost,
-            to_status=status_reopen,
-            is_active=True,
-            requires_comment=True,
-        )
-        lead_1 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
-        lead_2 = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_lost, custom_fields={})
+        status_lost = LeadStatus.objects.create(code="LOST", name="Lost", is_default_for_new_leads=True)
+        status_reopen = LeadStatus.objects.create(code="REOPEN", name="Reopen")
+        lead_1 = Lead.objects.create(partner=partner, status=status_lost, custom_fields={})
+        lead_2 = Lead.objects.create(partner=partner, status=status_lost, custom_fields={})
         self._auth(admin)
 
         response_no_reason = self.client.post(
@@ -1759,8 +1653,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             },
             format="json",
         )
-        self.assertEqual(response_no_reason.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response_no_reason.data["error"]["code"], "validation_error")
+        self.assertEqual(response_no_reason.status_code, status.HTTP_200_OK)
 
         response_with_reason = self.client.post(
             "/api/v1/leads/records/bulk-change-status/",
@@ -1771,7 +1664,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             },
             format="json",
         )
-        self.assertEqual(response_with_reason.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_with_reason.status_code, status.HTTP_400_BAD_REQUEST)
 
         lead_1.refresh_from_db()
         lead_2.refresh_from_db()
@@ -1781,17 +1674,9 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_manager_can_bulk_change_own_lead_status(self):
         manager = User.objects.create_user(username="manager_bulk_change", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Bulk Manager", code="partner-bulk-manager")
-        pipeline = Pipeline.objects.create(code="wf_bulk_manager", name="Workflow Bulk Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=manager, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -1813,17 +1698,9 @@ class LeadStatusCatalogApiTests(APITestCase):
         owner = User.objects.create_user(username="manager_bulk_owner", password="pass12345", role=UserRole.MANAGER)
         manager = User.objects.create_user(username="manager_bulk_other", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Bulk Foreign", code="partner-bulk-foreign")
-        pipeline = Pipeline.objects.create(code="wf_bulk_foreign", name="Workflow Bulk Foreign", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=owner, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -1845,10 +1722,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_metrics", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_metrics_all", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Metrics", code="partner-metrics")
-        pipeline = Pipeline.objects.create(code="wf_metrics", name="Workflow Metrics", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -1856,7 +1731,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
@@ -1869,7 +1743,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             manager_outcome=Lead.StageOutcome.WON,
             manager_outcome_at=timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)),
@@ -1882,7 +1755,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 8, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_lost,
             manager_outcome=Lead.StageOutcome.LOST,
             manager_outcome_at=timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)),
@@ -1895,7 +1767,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2025, 12, 20, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             manager_outcome=Lead.StageOutcome.WON,
             manager_outcome_at=timezone.make_aware(datetime(2026, 1, 12, 9, 0, 0)),
@@ -1908,7 +1779,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             manager_outcome=Lead.StageOutcome.WON,
             manager_outcome_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
@@ -1917,27 +1787,27 @@ class LeadStatusCatalogApiTests(APITestCase):
             received_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
         )
 
-        log_1 = LeadStatusAuditLog.objects.create(
+        log_1 = LeadAuditLog.objects.create(
             lead=lead_1,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
         )
         self._set_log_created_at(log_1, timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)))
 
-        log_2 = LeadStatusAuditLog.objects.create(
+        log_2 = LeadAuditLog.objects.create(
             lead=lead_2,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_lost,
             actor_user=admin,
         )
         self._set_log_created_at(log_2, timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)))
 
-        log_3 = LeadStatusAuditLog.objects.create(
+        log_3 = LeadAuditLog.objects.create(
             lead=lead_3,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -1969,10 +1839,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager = User.objects.create_user(username="manager_metrics_partner", password="pass12345", role=UserRole.MANAGER)
         partner_a = Partner.objects.create(name="Partner A", code="partner-a")
         partner_b = Partner.objects.create(name="Partner B", code="partner-b")
-        pipeline = Pipeline.objects.create(code="wf_metrics_partner", name="Workflow Metrics Partner", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -1980,7 +1848,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
@@ -1993,7 +1860,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
@@ -2003,7 +1869,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_lost,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
@@ -2013,31 +1878,30 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
         )
 
-        log_a1 = LeadStatusAuditLog.objects.create(
+        log_a1 = LeadAuditLog.objects.create(
             lead=lead_a1,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
         )
         self._set_log_created_at(log_a1, timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)))
-        log_a2 = LeadStatusAuditLog.objects.create(
+        log_a2 = LeadAuditLog.objects.create(
             lead=lead_a2,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_lost,
             actor_user=admin,
         )
         self._set_log_created_at(log_a2, timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)))
-        log_b = LeadStatusAuditLog.objects.create(
+        log_b = LeadAuditLog.objects.create(
             lead=lead_b,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -2064,10 +1928,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager = User.objects.create_user(username="manager_metrics_group", password="pass12345", role=UserRole.MANAGER)
         partner_a = Partner.objects.create(name="Partner Group A", code="partner-group-a")
         partner_b = Partner.objects.create(name="Partner Group B", code="partner-group-b")
-        pipeline = Pipeline.objects.create(code="wf_metrics_group", name="Workflow Metrics Group", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -2075,7 +1937,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
@@ -2088,7 +1949,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
@@ -2098,7 +1958,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_lost,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
@@ -2108,31 +1967,30 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 9, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 9, 10, 0, 0)),
         )
 
-        log_a = LeadStatusAuditLog.objects.create(
+        log_a = LeadAuditLog.objects.create(
             lead=lead_a,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
         )
         self._set_log_created_at(log_a, timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)))
-        log_b1 = LeadStatusAuditLog.objects.create(
+        log_b1 = LeadAuditLog.objects.create(
             lead=lead_b1,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_lost,
             actor_user=admin,
         )
         self._set_log_created_at(log_b1, timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)))
-        log_b2 = LeadStatusAuditLog.objects.create(
+        log_b2 = LeadAuditLog.objects.create(
             lead=lead_b2,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -2160,10 +2018,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_a_metrics", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_b_metrics", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Metrics Manager", code="partner-metrics-manager")
-        pipeline = Pipeline.objects.create(code="wf_metrics_manager", name="Workflow Metrics Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -2171,7 +2027,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
@@ -2184,7 +2039,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             first_manager=manager_a,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 2, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 2, 10, 0, 0)),
@@ -2194,7 +2048,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             first_manager=manager_a,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 4, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_lost,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 4, 10, 0, 0)),
@@ -2204,31 +2057,30 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             first_manager=manager_b,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 6, 10, 0, 0)),
         )
 
-        log_a1 = LeadStatusAuditLog.objects.create(
+        log_a1 = LeadAuditLog.objects.create(
             lead=lead_a1,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
         )
         self._set_log_created_at(log_a1, timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)))
-        log_a2 = LeadStatusAuditLog.objects.create(
+        log_a2 = LeadAuditLog.objects.create(
             lead=lead_a2,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_lost,
             actor_user=admin,
         )
         self._set_log_created_at(log_a2, timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)))
-        log_b = LeadStatusAuditLog.objects.create(
+        log_b = LeadAuditLog.objects.create(
             lead=lead_b,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -2248,10 +2100,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_1 = User.objects.create_user(username="manager_metrics_attr_1", password="pass12345", role=UserRole.MANAGER)
         manager_2 = User.objects.create_user(username="manager_metrics_attr_2", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Metrics Attribution", code="partner-metrics-attr")
-        pipeline = Pipeline.objects.create(code="wf_metrics_attr", name="Workflow Metrics Attribution", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -2264,7 +2114,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_1,
             first_manager=manager_1,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
@@ -2274,7 +2123,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_2,
             first_manager=manager_1,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 4, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 4, 10, 0, 0)),
@@ -2284,7 +2132,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_1,
             first_manager=manager_1,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_new,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
@@ -2300,10 +2147,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_metrics_ret", password="pass12345", role=UserRole.ADMIN)
         ret_user = User.objects.create_user(username="ret_metrics_user", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Metrics RET", code="partner-metrics-ret")
-        pipeline = Pipeline.objects.create(code="wf_metrics_ret", name="Workflow Metrics RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -2315,14 +2160,13 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=ret_user,
             first_manager=ret_user,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
         )
-        log = LeadStatusAuditLog.objects.create(
+        log = LeadAuditLog.objects.create(
             lead=lead,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -2342,10 +2186,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_a_group", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_b_group", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Metrics Group Manager", code="partner-metrics-group-manager")
-        pipeline = Pipeline.objects.create(code="wf_metrics_group_manager", name="Workflow Metrics Group Manager", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="WON",
             name="Won",
             is_terminal=True,
@@ -2353,7 +2195,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
@@ -2366,7 +2207,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_a,
             first_manager=manager_a,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 3, 10, 0, 0)),
@@ -2376,7 +2216,6 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             first_manager=manager_b,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_lost,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)),
@@ -2386,31 +2225,30 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager_b,
             first_manager=manager_b,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
-            pipeline=pipeline,
             status=status_won,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 7, 10, 0, 0)),
         )
 
-        log_a = LeadStatusAuditLog.objects.create(
+        log_a = LeadAuditLog.objects.create(
             lead=lead_a,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
         )
         self._set_log_created_at(log_a, timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)))
-        log_b1 = LeadStatusAuditLog.objects.create(
+        log_b1 = LeadAuditLog.objects.create(
             lead=lead_b1,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_lost,
             actor_user=admin,
         )
         self._set_log_created_at(log_b1, timezone.make_aware(datetime(2026, 1, 11, 9, 0, 0)))
-        log_b2 = LeadStatusAuditLog.objects.create(
+        log_b2 = LeadAuditLog.objects.create(
             lead=lead_b2,
-            event_type=LeadStatusAuditEvent.STATUS_CHANGED,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
             from_status=status_new,
             to_status=status_won,
             actor_user=admin,
@@ -2443,9 +2281,8 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_manager_can_create_lead_comment(self):
         manager = User.objects.create_user(username="manager_comment_create", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Create", code="partner-comment-create")
-        pipeline = Pipeline.objects.create(code="wf_comment_create", name="Workflow Comment Create", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(manager)
 
         response = self.client.post(
@@ -2466,19 +2303,18 @@ class LeadStatusCatalogApiTests(APITestCase):
             ).exists()
         )
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=lead,
                 entity_type="lead_comment",
-                event_type=LeadStatusAuditEvent.COMMENT_CREATED,
+                event_type=LeadAuditEvent.COMMENT_CREATED,
             ).exists()
         )
 
     def test_ret_can_create_lead_comment(self):
         ret = User.objects.create_user(username="ret_comment_create", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Comment RET", code="partner-comment-ret")
-        pipeline = Pipeline.objects.create(code="wf_comment_ret", name="Workflow Comment RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         self._auth(ret)
 
         response = self.client.post(
@@ -2494,9 +2330,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_comment_a", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_comment_b", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Update", code="partner-comment-update")
-        pipeline = Pipeline.objects.create(code="wf_comment_update", name="Workflow Comment Update", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment = LeadComment.objects.create(lead=lead, author=manager_a, body="Initial")
         self._auth(manager_b)
 
@@ -2515,9 +2350,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_comment_update", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_comment_owner", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Admin", code="partner-comment-admin")
-        pipeline = Pipeline.objects.create(code="wf_comment_admin", name="Workflow Comment Admin", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment = LeadComment.objects.create(lead=lead, author=manager, body="Initial")
         self._auth(admin)
 
@@ -2531,19 +2365,18 @@ class LeadStatusCatalogApiTests(APITestCase):
         comment.refresh_from_db()
         self.assertEqual(comment.body, "Admin updated")
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=lead,
                 entity_type="lead_comment",
-                event_type=LeadStatusAuditEvent.COMMENT_UPDATED,
+                event_type=LeadAuditEvent.COMMENT_UPDATED,
             ).exists()
         )
 
     def test_manager_delete_comment_is_soft_and_can_restore(self):
         manager = User.objects.create_user(username="manager_comment_delete_restore", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Delete", code="partner-comment-delete")
-        pipeline = Pipeline.objects.create(code="wf_comment_delete", name="Workflow Comment Delete", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment = LeadComment.objects.create(lead=lead, author=manager, body="To be deleted")
         self._auth(manager)
 
@@ -2554,10 +2387,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         deleted_comment = LeadComment.all_objects.get(id=comment.id)
         self.assertTrue(deleted_comment.is_deleted)
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 entity_type="lead_comment",
                 entity_id=str(comment.id),
-                event_type=LeadStatusAuditEvent.COMMENT_SOFT_DELETED,
+                event_type=LeadAuditEvent.COMMENT_SOFT_DELETED,
             ).exists()
         )
 
@@ -2568,10 +2401,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertFalse(restored_comment.is_deleted)
         self.assertTrue(LeadComment.objects.filter(id=comment.id).exists())
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 entity_type="lead_comment",
                 entity_id=str(comment.id),
-                event_type=LeadStatusAuditEvent.COMMENT_RESTORED,
+                event_type=LeadAuditEvent.COMMENT_RESTORED,
             ).exists()
         )
 
@@ -2579,9 +2412,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_comment_restore_a", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_comment_restore_b", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Restore Deny", code="partner-comment-restore-deny")
-        pipeline = Pipeline.objects.create(code="wf_comment_restore_deny", name="Workflow Comment Restore Deny", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment = LeadComment.objects.create(lead=lead, author=manager_a, body="Protected comment")
         comment.delete()
         self._auth(manager_b)
@@ -2596,9 +2428,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_comment_restore", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_comment_restore_owner", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Restore", code="partner-comment-restore")
-        pipeline = Pipeline.objects.create(code="wf_comment_restore", name="Workflow Comment Restore", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment = LeadComment.objects.create(lead=lead, author=manager, body="Admin will restore")
         comment.delete()
         self._auth(admin)
@@ -2611,10 +2442,9 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_list_comments_can_be_filtered_by_lead(self):
         manager = User.objects.create_user(username="manager_comment_list", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment List", code="partner-comment-list")
-        pipeline = Pipeline.objects.create(code="wf_comment_list", name="Workflow Comment List", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead_a = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_b = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_a = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         comment_a = LeadComment.objects.create(lead=lead_a, author=manager, body="A")
         LeadComment.objects.create(lead=lead_b, author=manager, body="B")
         self._auth(manager)
@@ -2628,9 +2458,8 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_pinned_comment_is_listed_first(self):
         manager = User.objects.create_user(username="manager_comment_pin", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Pin", code="partner-comment-pin")
-        pipeline = Pipeline.objects.create(code="wf_comment_pin", name="Workflow Comment Pin", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         first = LeadComment.objects.create(lead=lead, author=manager, body="old regular")
         pinned = LeadComment.objects.create(lead=lead, author=manager, body="important", is_pinned=True)
         self._auth(manager)
@@ -2646,9 +2475,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_b = User.objects.create_user(username="manager_comment_filter_b", password="pass12345", role=UserRole.MANAGER)
         manager_c = User.objects.create_user(username="manager_comment_filter_c", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Comment Authors", code="partner-comment-authors")
-        pipeline = Pipeline.objects.create(code="wf_comment_authors", name="Workflow Comment Authors", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, custom_fields={})
         LeadComment.objects.create(lead=lead, author=manager_a, body="A")
         LeadComment.objects.create(lead=lead, author=manager_b, body="B")
         excluded = LeadComment.objects.create(lead=lead, author=manager_c, body="C")
@@ -2685,10 +2513,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.data["partner"]["id"], str(partner.id))
         self.assertEqual(response.data["email"], "john.lead@example.com")
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 entity_type="lead",
                 entity_id=str(response.data["id"]),
-                event_type=LeadStatusAuditEvent.LEAD_CREATED,
+                event_type=LeadAuditEvent.LEAD_CREATED,
             ).exists()
         )
 
@@ -2781,10 +2609,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.priority, Lead.Priority.HIGH)
         self.assertEqual(lead.custom_fields.get("stage_note"), "hot lead")
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=lead,
                 entity_type="lead",
-                event_type=LeadStatusAuditEvent.LEAD_UPDATED,
+                event_type=LeadAuditEvent.LEAD_UPDATED,
             ).exists()
         )
 
@@ -2939,8 +2767,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         lead.refresh_from_db()
         self.assertEqual(lead.priority, Lead.Priority.NORMAL)
 
@@ -2999,8 +2826,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         lead.refresh_from_db()
         self.assertIsNone(lead.next_contact_at)
 
@@ -3033,10 +2859,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertFalse(Lead.objects.filter(id=lead.id).exists())
         self.assertTrue(Lead.all_objects.filter(id=lead.id).exists())
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 entity_type="lead",
                 entity_id=str(lead.id),
-                event_type=LeadStatusAuditEvent.LEAD_SOFT_DELETED,
+                event_type=LeadAuditEvent.LEAD_SOFT_DELETED,
             ).exists()
         )
 
@@ -3068,10 +2894,10 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Lead.all_objects.filter(id=lead.id).exists())
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 entity_type="lead",
                 entity_id=str(lead.id),
-                event_type=LeadStatusAuditEvent.LEAD_HARD_DELETED,
+                event_type=LeadAuditEvent.LEAD_HARD_DELETED,
             ).exists()
         )
 
@@ -3135,9 +2961,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_target = User.objects.create_user(username="manager_target_tl_ret", password="pass12345", role=UserRole.MANAGER)
         ret_owner = User.objects.create_user(username="ret_owner_assign", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner TL Assign RET", code="partner-tl-assign-ret")
-        pipeline = Pipeline.objects.create(code="wf_tl_assign_ret", name="Workflow TL Assign RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=ret_owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=ret_owner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -3156,9 +2981,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_target = User.objects.create_user(username="manager_target_tl_admin", password="pass12345", role=UserRole.MANAGER)
         admin_owner = User.objects.create_user(username="admin_owner_assign", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner TL Assign ADMIN", code="partner-tl-assign-admin")
-        pipeline = Pipeline.objects.create(code="wf_tl_assign_admin", name="Workflow TL Assign ADMIN", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        lead = Lead.objects.create(partner=partner, manager=admin_owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=admin_owner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -3176,17 +3000,9 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_status_ret", password="pass12345", role=UserRole.TEAMLEADER)
         ret_owner = User.objects.create_user(username="ret_status_owner", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner TL Status RET", code="partner-tl-status-ret")
-        pipeline = Pipeline.objects.create(code="wf_tl_status_ret", name="Workflow TL Status RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
-        LeadStatusTransition.objects.create(
-            pipeline=pipeline,
-            from_status=status_new,
-            to_status=status_work,
-            is_active=True,
-            requires_comment=False,
-        )
-        lead = Lead.objects.create(partner=partner, manager=ret_owner, pipeline=pipeline, status=status_new, custom_fields={})
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
+        lead = Lead.objects.create(partner=partner, manager=ret_owner, status=status_new, custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -3195,8 +3011,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         lead.refresh_from_db()
         self.assertEqual(lead.status_id, status_new.id)
 
@@ -3204,16 +3019,14 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_force_status_manager", password="pass12345", role=UserRole.TEAMLEADER)
         manager_owner = User.objects.create_user(username="manager_force_status_owner", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner TL Force Status", code="partner-tl-force-status")
-        pipeline = Pipeline.objects.create(code="wf_tl_force_status", name="Workflow TL Force Status", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
             conversion_bucket=LeadStatus.ConversionBucket.LOST,
         )
-        lead = Lead.objects.create(partner=partner, manager=manager_owner, pipeline=pipeline, status=status_new, phone="+19991004", custom_fields={})
+        lead = Lead.objects.create(partner=partner, manager=manager_owner, status=status_new, phone="+19991004", custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -3230,16 +3043,14 @@ class LeadStatusCatalogApiTests(APITestCase):
         teamleader = User.objects.create_user(username="tl_force_status_ret", password="pass12345", role=UserRole.TEAMLEADER)
         ret_owner = User.objects.create_user(username="ret_force_status_owner", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner TL Force Status RET", code="partner-tl-force-status-ret")
-        pipeline = Pipeline.objects.create(code="wf_tl_force_status_ret", name="Workflow TL Force Status RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
             conversion_bucket=LeadStatus.ConversionBucket.LOST,
         )
-        lead = Lead.objects.create(partner=partner, manager=ret_owner, pipeline=pipeline, status=status_new, phone="+19991005", custom_fields={})
+        lead = Lead.objects.create(partner=partner, manager=ret_owner, status=status_new, phone="+19991005", custom_fields={})
         self._auth(teamleader)
 
         response = self.client.post(
@@ -3248,7 +3059,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         lead.refresh_from_db()
         self.assertEqual(lead.status_id, status_new.id)
 
@@ -3256,16 +3067,14 @@ class LeadStatusCatalogApiTests(APITestCase):
         admin = User.objects.create_user(username="admin_force_status_ret", password="pass12345", role=UserRole.ADMIN)
         ret_owner = User.objects.create_user(username="ret_force_status_owner_adm", password="pass12345", role=UserRole.RET)
         partner = Partner.objects.create(name="Partner Admin Force Status RET", code="partner-admin-force-status-ret")
-        pipeline = Pipeline.objects.create(code="wf_admin_force_status_ret", name="Workflow Admin Force Status RET", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
         status_lost = LeadStatus.objects.create(
-            pipeline=pipeline,
             code="LOST",
             name="Lost",
             is_terminal=True,
             conversion_bucket=LeadStatus.ConversionBucket.LOST,
         )
-        lead = Lead.objects.create(partner=partner, manager=ret_owner, pipeline=pipeline, status=status_new, phone="+19991006", custom_fields={})
+        lead = Lead.objects.create(partner=partner, manager=ret_owner, status=status_new, phone="+19991006", custom_fields={})
         self._auth(admin)
 
         response = self.client.post(
@@ -3308,6 +3117,36 @@ class LeadStatusCatalogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_ret_can_create_reload_when_ftd_absent(self):
+        ret_owner = User.objects.create_user(username="ret_dep_no_ftd", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner RET Dep No FTD", code="partner-ret-dep-no-ftd")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=ret_owner,
+            status=status_new,
+            phone="+19991009",
+            custom_fields={},
+        )
+        self._auth(ret_owner)
+
+        first_dep = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/deposits/",
+            {"amount": "200.00"},
+            format="json",
+        )
+        self.assertEqual(first_dep.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(first_dep.data["type"], LeadDeposit.Type.RELOAD)
+
+        second_dep = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/deposits/",
+            {"amount": "75.00"},
+            format="json",
+        )
+        self.assertEqual(second_dep.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_dep.data["type"], LeadDeposit.Type.DEPOSIT)
+        self.assertFalse(LeadDeposit.objects.filter(lead=lead, type=LeadDeposit.Type.FTD).exists())
+
     def test_partner_duplicate_attempt_is_saved_without_creating_new_lead(self):
         partner = Partner.objects.create(name="Partner Dup Attempt", code="partner-dup-attempt")
         source = PartnerSource.objects.create(partner=partner, name="Google", code="google", is_active=True)
@@ -3337,11 +3176,11 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(attempt.phone, "+123456")
         self.assertEqual(attempt.email, "duplicate@example.com")
         self.assertTrue(
-            LeadStatusAuditLog.objects.filter(
+            LeadAuditLog.objects.filter(
                 lead=existing,
                 entity_type="duplicate_attempt",
                 entity_id=str(attempt.id),
-                event_type=LeadStatusAuditEvent.DUPLICATE_REJECTED,
+                event_type=LeadAuditEvent.DUPLICATE_REJECTED,
             ).exists()
         )
 
@@ -3351,14 +3190,13 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_b = User.objects.create_user(username="manager_filter_in_b", password="pass12345", role=UserRole.MANAGER)
         manager_c = User.objects.create_user(username="manager_filter_in_c", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Filter In", code="partner-filter-in")
-        pipeline = Pipeline.objects.create(code="wf_filter_in", name="Workflow Filter In", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
-        status_work = LeadStatus.objects.create(pipeline=pipeline, code="WORK", name="Work")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK", name="Work")
 
-        lead_a = Lead.objects.create(partner=partner, manager=manager_a, pipeline=pipeline, status=status_new, custom_fields={})
-        lead_b = Lead.objects.create(partner=partner, manager=manager_b, pipeline=pipeline, status=status_new, custom_fields={})
-        Lead.objects.create(partner=partner, manager=manager_c, pipeline=pipeline, status=status_new, custom_fields={})
-        Lead.objects.create(partner=partner, manager=manager_a, pipeline=pipeline, status=status_work, custom_fields={})
+        lead_a = Lead.objects.create(partner=partner, manager=manager_a, status=status_new, custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, manager=manager_b, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=manager_c, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=manager_a, status=status_work, custom_fields={})
         self._auth(admin)
 
         response = self.client.get(
@@ -3379,17 +3217,16 @@ class LeadStatusCatalogApiTests(APITestCase):
         ret_user = User.objects.create_user(username="ret_role_filter", password="pass12345", role=UserRole.RET)
         teamleader_user = User.objects.create_user(username="tl_role_filter", password="pass12345", role=UserRole.TEAMLEADER)
         partner = Partner.objects.create(name="Partner Role Filter", code="partner-role-filter")
-        pipeline = Pipeline.objects.create(code="wf_role_filter", name="Workflow Role Filter", is_default=True)
-        status_new = LeadStatus.objects.create(pipeline=pipeline, code="NEW", name="New", is_default_for_new_leads=True)
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
 
         lead_manager = Lead.objects.create(
-            partner=partner, manager=manager_user, pipeline=pipeline, status=status_new, custom_fields={}
+            partner=partner, manager=manager_user, status=status_new, custom_fields={}
         )
-        Lead.objects.create(partner=partner, manager=ret_user, pipeline=pipeline, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=ret_user, status=status_new, custom_fields={})
         Lead.objects.create(
-            partner=partner, manager=teamleader_user, pipeline=pipeline, status=status_new, custom_fields={}
+            partner=partner, manager=teamleader_user, status=status_new, custom_fields={}
         )
-        Lead.objects.create(partner=partner, manager=None, pipeline=pipeline, status=status_new, custom_fields={})
+        Lead.objects.create(partner=partner, manager=None, status=status_new, custom_fields={})
         self._auth(admin)
 
         response = self.client.get("/api/v1/leads/records/", {"manager_role": UserRole.MANAGER})
@@ -3398,3 +3235,333 @@ class LeadStatusCatalogApiTests(APITestCase):
         items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["id"], lead_manager.id)
+
+    def test_leads_list_supports_extended_filters(self):
+        admin = User.objects.create_user(username="admin_leads_ext_filters", password="pass12345", role=UserRole.ADMIN)
+        manager_a = User.objects.create_user(username="manager_ext_filter_a", password="pass12345", role=UserRole.MANAGER)
+        manager_b = User.objects.create_user(username="manager_ext_filter_b", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Extended Filters", code="partner-extended-filters")
+        source = PartnerSource.objects.create(partner=partner, name="Google", code="google-ext", is_active=True)
+        status_new = LeadStatus.objects.create(code="NEW_EXT_FILTER", name="New Ext", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON_EXT_FILTER",
+            name="Won Ext",
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+
+        lead_match = Lead.objects.create(
+            partner=partner,
+            source=source,
+            manager=manager_a,
+            first_manager=manager_a,
+            status=status_won,
+            geo="RU",
+            full_name="Ivan Petrov",
+            phone="+700000001",
+            email="ivan.petrov@example.com",
+            assigned_at=timezone.make_aware(datetime(2026, 1, 10, 10, 0, 0)),
+            first_assigned_at=timezone.make_aware(datetime(2026, 1, 10, 10, 5, 0)),
+            next_contact_at=timezone.make_aware(datetime(2026, 1, 11, 12, 0, 0)),
+            manager_outcome=Lead.StageOutcome.WON,
+            manager_outcome_at=timezone.make_aware(datetime(2026, 1, 10, 14, 0, 0)),
+            manager_outcome_by=manager_a,
+            received_at=timezone.make_aware(datetime(2026, 1, 10, 9, 0, 0)),
+            custom_fields={},
+        )
+        Lead.objects.create(
+            partner=partner,
+            source=source,
+            manager=manager_b,
+            first_manager=manager_b,
+            status=status_new,
+            geo="CH",
+            full_name="Maria Chen",
+            phone="+700000002",
+            email="maria.chen@example.com",
+            assigned_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
+            first_assigned_at=timezone.make_aware(datetime(2026, 1, 20, 10, 5, 0)),
+            next_contact_at=timezone.make_aware(datetime(2026, 1, 22, 12, 0, 0)),
+            manager_outcome=Lead.StageOutcome.LOST,
+            manager_outcome_at=timezone.make_aware(datetime(2026, 1, 20, 14, 0, 0)),
+            manager_outcome_by=manager_b,
+            received_at=timezone.make_aware(datetime(2026, 1, 20, 9, 0, 0)),
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.get(
+            "/api/v1/leads/records/",
+            {
+                "partner__in": str(partner.id),
+                "source__in": str(source.id),
+                "manager__in": str(manager_a.id),
+                "first_manager__in": str(manager_a.id),
+                "status_code": "won_ext_filter",
+                "manager_outcome__in": Lead.StageOutcome.WON,
+                "manager_outcome_by__in": str(manager_a.id),
+                "geo": "RU",
+                "full_name": "ivan",
+                "phone__icontains": "+7000000",
+                "email__icontains": "petrov@",
+                "received_from": "2026-01-01T00:00:00Z",
+                "received_to": "2026-01-15T23:59:59Z",
+                "is_unassigned": "false",
+                "has_next_contact": "true",
+                "has_manager_outcome_at": "true",
+                "has_email": "true",
+                "has_phone": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["id"], lead_match.id)
+
+    def test_leads_list_supports_unassigned_and_empty_email_filters(self):
+        admin = User.objects.create_user(username="admin_leads_bool_filters", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_bool_filter", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Bool Filters", code="partner-bool-filters")
+        status_new = LeadStatus.objects.create(code="NEW_BOOL_FILTER", name="New Bool", is_default_for_new_leads=True)
+        unassigned_lead = Lead.objects.create(
+            partner=partner,
+            manager=None,
+            status=status_new,
+            phone="+700000011",
+            email="",
+            custom_fields={},
+        )
+        Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            status=status_new,
+            phone="+700000012",
+            email="has@email.test",
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.get(
+            "/api/v1/leads/records/",
+            {
+                "is_unassigned": "true",
+                "has_email": "false",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["id"], unassigned_lead.id)
+
+    def test_leads_list_returns_informative_manager_outcome_by(self):
+        admin = User.objects.create_user(username="admin_outcome_by_list", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(
+            username="manager_outcome_author",
+            password="pass12345",
+            role=UserRole.MANAGER,
+            first_name="Nina",
+            last_name="Lopez",
+        )
+        partner = Partner.objects.create(name="Partner Outcome Author", code="partner-outcome-author")
+        status_won = LeadStatus.objects.create(
+            code="WON_OUTCOME_AUTHOR",
+            name="Won Outcome Author",
+            is_default_for_new_leads=True,
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            first_manager=manager,
+            status=status_won,
+            phone="+700000021",
+            manager_outcome=Lead.StageOutcome.WON,
+            manager_outcome_by=manager,
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.get("/api/v1/leads/records/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        manager_payload = items[0]["manager"]
+        self.assertEqual(manager_payload["id"], str(manager.id))
+        self.assertEqual(manager_payload["username"], manager.username)
+        self.assertEqual(manager_payload["first_name"], "Nina")
+        self.assertEqual(manager_payload["last_name"], "Lopez")
+        self.assertEqual(manager_payload["role"], UserRole.MANAGER)
+        first_manager_payload = items[0]["first_manager"]
+        self.assertEqual(first_manager_payload["id"], str(manager.id))
+        self.assertEqual(first_manager_payload["first_name"], "Nina")
+        self.assertEqual(first_manager_payload["last_name"], "Lopez")
+        outcome_author = items[0]["manager_outcome_by"]
+        self.assertIsInstance(outcome_author, dict)
+        self.assertEqual(outcome_author["id"], str(manager.id))
+        self.assertEqual(outcome_author["username"], manager.username)
+        self.assertEqual(outcome_author["role"], UserRole.MANAGER)
+        self.assertEqual(outcome_author["first_name"], "Nina")
+        self.assertEqual(outcome_author["last_name"], "Lopez")
+
+    def test_teamleader_list_hides_ret_admin_super_leads(self):
+        teamleader = User.objects.create_user(username="tl_scope_list", password="pass12345", role=UserRole.TEAMLEADER)
+        manager_user = User.objects.create_user(username="manager_scope_list", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_scope_list", password="pass12345", role=UserRole.RET)
+        admin_user = User.objects.create_user(username="admin_scope_list", password="pass12345", role=UserRole.ADMIN)
+        super_user = User.objects.create_user(
+            username="su_scope_list",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        partner = Partner.objects.create(name="Partner TL Scope List", code="partner-tl-scope-list")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+
+        own_lead = Lead.objects.create(partner=partner, manager=teamleader, status=status_new, phone="+15550001", custom_fields={})
+        manager_lead = Lead.objects.create(partner=partner, manager=manager_user, status=status_new, phone="+15550002", custom_fields={})
+        unassigned_lead = Lead.objects.create(partner=partner, manager=None, status=status_new, phone="+15550003", custom_fields={})
+        ret_lead = Lead.objects.create(partner=partner, manager=ret_user, status=status_new, phone="+15550004", custom_fields={})
+        admin_lead = Lead.objects.create(partner=partner, manager=admin_user, status=status_new, phone="+15550005", custom_fields={})
+        super_lead = Lead.objects.create(partner=partner, manager=super_user, status=status_new, phone="+15550006", custom_fields={})
+        self._auth(teamleader)
+
+        response = self.client.get("/api/v1/leads/records/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        returned_ids = {item["id"] for item in items}
+        self.assertIn(own_lead.id, returned_ids)
+        self.assertIn(manager_lead.id, returned_ids)
+        self.assertIn(unassigned_lead.id, returned_ids)
+        self.assertNotIn(ret_lead.id, returned_ids)
+        self.assertNotIn(admin_lead.id, returned_ids)
+        self.assertNotIn(super_lead.id, returned_ids)
+
+    def test_teamleader_cannot_retrieve_ret_admin_super_leads(self):
+        teamleader = User.objects.create_user(username="tl_scope_retrieve", password="pass12345", role=UserRole.TEAMLEADER)
+        ret_user = User.objects.create_user(username="ret_scope_retrieve", password="pass12345", role=UserRole.RET)
+        admin_user = User.objects.create_user(username="admin_scope_retrieve", password="pass12345", role=UserRole.ADMIN)
+        super_user = User.objects.create_user(
+            username="su_scope_retrieve",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        partner = Partner.objects.create(name="Partner TL Scope Retrieve", code="partner-tl-scope-retrieve")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        ret_lead = Lead.objects.create(partner=partner, manager=ret_user, status=status_new, phone="+15551001", custom_fields={})
+        admin_lead = Lead.objects.create(partner=partner, manager=admin_user, status=status_new, phone="+15551002", custom_fields={})
+        super_lead = Lead.objects.create(partner=partner, manager=super_user, status=status_new, phone="+15551003", custom_fields={})
+        self._auth(teamleader)
+
+        self.assertEqual(self.client.get(f"/api/v1/leads/records/{ret_lead.id}/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(f"/api/v1/leads/records/{admin_lead.id}/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(f"/api/v1/leads/records/{super_lead.id}/").status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_teamleader_can_create_only_ftd_deposit(self):
+        teamleader = User.objects.create_user(username="tl_deposit_ftd_only", password="pass12345", role=UserRole.TEAMLEADER)
+        manager_user = User.objects.create_user(username="manager_deposit_ftd_only", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner TL Deposit FTD", code="partner-tl-deposit-ftd")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, manager=manager_user, status=status_new, phone="+15552001", custom_fields={})
+        self._auth(teamleader)
+
+        first_dep = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/deposits/",
+            {"amount": "100.00"},
+            format="json",
+        )
+        self.assertEqual(first_dep.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(first_dep.data["type"], LeadDeposit.Type.FTD)
+
+        second_dep = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/deposits/",
+            {"amount": "50.00"},
+            format="json",
+        )
+        self.assertEqual(second_dep.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(second_dep.data["error"]["code"], "validation_error")
+
+    def test_teamleader_transfer_requires_transfer_author_and_can_attribute_to_manager(self):
+        teamleader = User.objects.create_user(username="tl_transfer_author", password="pass12345", role=UserRole.TEAMLEADER)
+        manager_user = User.objects.create_user(username="manager_transfer_author", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_transfer_author", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner TL Transfer Author", code="partner-tl-transfer-author")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON",
+            name="Won",
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(partner=partner, manager=manager_user, status=status_new, phone="+15553001", custom_fields={})
+        self._auth(teamleader)
+
+        missing_author = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "amount": "120.00", "reason": "won by manager"},
+            format="json",
+        )
+        self.assertEqual(missing_author.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing_author.data["error"]["code"], "validation_error")
+
+        ok_response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {
+                "ret_manager": ret_user.id,
+                "to_status": status_won.id,
+                "amount": "120.00",
+                "reason": "won by manager",
+                "transfer_author": manager_user.id,
+            },
+            format="json",
+        )
+        self.assertEqual(ok_response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, ret_user.id)
+        self.assertEqual(lead.manager_outcome_by_id, manager_user.id)
+        ftd = LeadDeposit.objects.get(lead=lead, type=LeadDeposit.Type.FTD)
+        self.assertEqual(ftd.creator_id, manager_user.id)
+
+    def test_manager_cannot_override_transfer_author(self):
+        manager = User.objects.create_user(username="manager_transfer_override", password="pass12345", role=UserRole.MANAGER)
+        manager_other = User.objects.create_user(
+            username="manager_transfer_override_other",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        ret_user = User.objects.create_user(username="ret_transfer_override", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Manager Transfer Override", code="partner-manager-transfer-override")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON",
+            name="Won",
+            is_terminal=True,
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+15554001", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {
+                "ret_manager": ret_user.id,
+                "to_status": status_won.id,
+                "amount": "130.00",
+                "reason": "won",
+                "transfer_author": manager_other.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"]["code"], "validation_error")

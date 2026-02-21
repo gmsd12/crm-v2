@@ -15,8 +15,6 @@ from apps.leads.models import (
     LeadComment,
     LeadDeposit,
     LeadStatus,
-    LeadStatusTransition,
-    Pipeline,
 )
 from apps.partners.models import Partner
 
@@ -24,19 +22,11 @@ User = get_user_model()
 GEO_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 
-class PipelineSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Pipeline
-        fields = ["id", "code", "name", "is_default", "is_active", "created_at", "updated_at"]
-        read_only_fields = ["id", "created_at", "updated_at"]
-
-
 class LeadStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadStatus
         fields = [
             "id",
-            "pipeline",
             "code",
             "name",
             "order",
@@ -52,36 +42,7 @@ class LeadStatusSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
-class LeadStatusTransitionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = LeadStatusTransition
-        fields = [
-            "id",
-            "pipeline",
-            "from_status",
-            "to_status",
-            "is_active",
-            "requires_comment",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "created_at", "updated_at"]
-
-    def validate(self, attrs):
-        pipeline = attrs.get("pipeline") or getattr(self.instance, "pipeline", None)
-        from_status = attrs.get("from_status") or getattr(self.instance, "from_status", None)
-        to_status = attrs.get("to_status") or getattr(self.instance, "to_status", None)
-
-        if from_status and to_status and from_status.id == to_status.id:
-            raise serializers.ValidationError({"to_status": "from_status and to_status must be different"})
-        if pipeline and from_status and from_status.pipeline_id != pipeline.id:
-            raise serializers.ValidationError({"from_status": "from_status must belong to selected pipeline"})
-        if pipeline and to_status and to_status.pipeline_id != pipeline.id:
-            raise serializers.ValidationError({"to_status": "to_status must belong to selected pipeline"})
-        return attrs
-
-
-class LeadStatusAuditLogSerializer(serializers.ModelSerializer):
+class LeadAuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source="actor_user.username", read_only=True)
     from_status_code = serializers.CharField(source="from_status.code", read_only=True)
     to_status_code = serializers.CharField(source="to_status.code", read_only=True)
@@ -111,11 +72,11 @@ class LeadStatusAuditLogSerializer(serializers.ModelSerializer):
 
 
 class LeadSerializer(serializers.ModelSerializer):
-    pipeline = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     first_manager = serializers.SerializerMethodField()
+    manager_outcome_by = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
 
     class Meta:
@@ -127,7 +88,6 @@ class LeadSerializer(serializers.ModelSerializer):
             "manager",
             "first_manager",
             "source",
-            "pipeline",
             "status",
             "full_name",
             "phone",
@@ -140,15 +100,19 @@ class LeadSerializer(serializers.ModelSerializer):
             "manager_outcome",
             "manager_outcome_at",
             "manager_outcome_by",
-            "transferred_to_ret_at",
             "custom_fields",
             "received_at",
         ]
 
-    def get_pipeline(self, obj):
-        if not obj.pipeline_id:
-            return None
-        return {"id": str(obj.pipeline_id), "code": obj.pipeline.code, "name": obj.pipeline.name}
+    @staticmethod
+    def _manager_like_payload(user):
+        return {
+            "id": str(user.id),
+            "username": user.username,
+            "first_name": (user.first_name or "").strip(),
+            "last_name": (user.last_name or "").strip(),
+            "role": user.role,
+        }
 
     def get_status(self, obj):
         if not obj.status_id:
@@ -161,12 +125,17 @@ class LeadSerializer(serializers.ModelSerializer):
     def get_manager(self, obj):
         if not obj.manager_id:
             return None
-        return {"id": str(obj.manager_id), "username": obj.manager.username}
+        return self._manager_like_payload(obj.manager)
 
     def get_first_manager(self, obj):
         if not obj.first_manager_id:
             return None
-        return {"id": str(obj.first_manager_id), "username": obj.first_manager.username}
+        return self._manager_like_payload(obj.first_manager)
+
+    def get_manager_outcome_by(self, obj):
+        if not obj.manager_outcome_by_id:
+            return None
+        return self._manager_like_payload(obj.manager_outcome_by)
 
     def get_source(self, obj):
         if not obj.source_id:
@@ -246,36 +215,10 @@ class LeadStatusChangeSerializer(serializers.Serializer):
         lead = self.context["lead"]
         to_status = attrs["to_status"]
         reason = (attrs.get("reason") or "").strip()
-        force = attrs.get("force", False)
-
         if to_status.id == lead.status_id:
             raise serializers.ValidationError({"to_status": "Lead already has this status"})
-        if force:
-            attrs["reason"] = reason
-            attrs["_transition"] = None
-            return attrs
-
-        if not lead.pipeline_id or not lead.status_id:
-            raise serializers.ValidationError("Lead has no current workflow status")
-        if to_status.pipeline_id != lead.pipeline_id:
-            raise serializers.ValidationError({"to_status": "to_status must belong to lead pipeline"})
-
-        transition = (
-            LeadStatusTransition.objects.filter(
-                pipeline_id=lead.pipeline_id,
-                from_status_id=lead.status_id,
-                to_status_id=to_status.id,
-                is_active=True,
-            )
-            .first()
-        )
-        if not transition:
-            raise serializers.ValidationError({"to_status": "Transition is not allowed"})
-        if transition.requires_comment and not reason:
-            raise serializers.ValidationError({"reason": "Comment is required for this transition"})
 
         attrs["reason"] = reason
-        attrs["_transition"] = transition
         return attrs
 
 
@@ -369,7 +312,6 @@ class BulkLeadUnassignManagerSerializer(serializers.Serializer):
 class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
-    pipeline = serializers.PrimaryKeyRelatedField(queryset=Pipeline.objects.filter(is_active=True), required=False)
     partner = serializers.PrimaryKeyRelatedField(queryset=Partner.objects.all(), required=False)
     group_by = serializers.ChoiceField(choices=("partner",), required=False)
 
@@ -401,14 +343,44 @@ class LeadCommentSerializer(serializers.ModelSerializer):
 
 class LeadCloseWonTransferSerializer(serializers.Serializer):
     ret_manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    to_status = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.filter(is_active=True))
+    transfer_author = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=False)
+    reason = serializers.CharField(required=True, allow_blank=False, max_length=1000)
+    comment = serializers.CharField(required=False, allow_blank=False, max_length=5000)
+    force_status = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
+        request = self.context.get("request")
+        request_user = getattr(request, "user", None)
+        request_role = getattr(request_user, "role", None)
+
         ret_manager = attrs["ret_manager"]
-        if ret_manager.role != UserRole.RET:
-            raise serializers.ValidationError({"ret_manager": "ret_manager must have RET role"})
+        if ret_manager.role not in {UserRole.RET, UserRole.ADMIN, UserRole.SUPERUSER}:
+            raise serializers.ValidationError({"ret_manager": "ret_manager must have RET, ADMIN or SUPERUSER role"})
+        to_status = attrs["to_status"]
+        if to_status.conversion_bucket != LeadStatus.ConversionBucket.WON:
+            raise serializers.ValidationError({"to_status": "to_status must belong to WON conversion bucket"})
+
+        transfer_author = attrs.get("transfer_author")
+        if transfer_author and transfer_author.role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
+            raise serializers.ValidationError({"transfer_author": "transfer_author must be MANAGER or TEAMLEADER"})
+        if request_role == UserRole.MANAGER and transfer_author and transfer_author.id != request_user.id:
+            raise serializers.ValidationError({"transfer_author": "Managers cannot override transfer_author"})
+        if request_role == UserRole.TEAMLEADER and transfer_author is None:
+            raise serializers.ValidationError({"transfer_author": "transfer_author is required for teamleaders"})
+
         attrs["reason"] = (attrs.get("reason") or "").strip()
+        if not attrs["reason"]:
+            raise serializers.ValidationError({"reason": "reason is required"})
+        if "comment" in attrs:
+            attrs["comment"] = attrs["comment"].strip()
+            if not attrs["comment"]:
+                raise serializers.ValidationError({"comment": "comment cannot be blank"})
         return attrs
 
 

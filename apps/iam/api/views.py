@@ -76,7 +76,13 @@ def login_view(request):
     resp = Response(
         {
             "access": access,
-            "user": {"id": user.id, "username": user.username, "role": getattr(user, "role", None)},
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "first_name": (user.first_name or "").strip(),
+                "last_name": (user.last_name or "").strip(),
+                "role": getattr(user, "role", None),
+            },
         },
         status=status.HTTP_200_OK,
     )
@@ -129,7 +135,13 @@ def logout_view(request):
 def me_view(request):
     u = request.user
     return Response(
-        {"id": u.id, "username": u.username, "role": getattr(u, "role", None)},
+        {
+            "id": u.id,
+            "username": u.username,
+            "first_name": (u.first_name or "").strip(),
+            "last_name": (u.last_name or "").strip(),
+            "role": getattr(u, "role", None),
+        },
         status=status.HTTP_200_OK,
     )
 

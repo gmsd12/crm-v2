@@ -3,13 +3,10 @@ from .models import (
     LeadAuditLog,
     Lead,
     LeadDeposit,
-    LeadRetTransfer,
     LeadComment,
     LeadDuplicateAttempt,
     LeadStatus,
-    LeadStatusIdempotencyKey,
-    LeadStatusTransition,
-    Pipeline,
+    LeadIdempotencyKey,
 )
 
 
@@ -25,19 +22,9 @@ class SoftDeleteAdminMixin:
         return queryset
 
 
-@admin.register(Pipeline)
-class PipelineAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("code", "name", "is_default", "is_active", "is_deleted", "created_at")
-    list_filter = ("is_default", "is_active", "is_deleted")
-    search_fields = ("code", "name")
-    ordering = ("code",)
-    actions = ("restore_selected",)
-
-
 @admin.register(LeadStatus)
 class LeadStatusAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     list_display = (
-        "pipeline",
         "code",
         "name",
         "order",
@@ -48,18 +35,9 @@ class LeadStatusAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "conversion_bucket",
         "is_deleted",
     )
-    list_filter = ("pipeline", "is_active", "is_terminal", "is_valid", "is_deleted")
-    search_fields = ("code", "name", "pipeline__code", "pipeline__name")
-    ordering = ("pipeline__code", "order", "code")
-    actions = ("restore_selected",)
-
-
-@admin.register(LeadStatusTransition)
-class LeadStatusTransitionAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("pipeline", "from_status", "to_status", "is_active", "requires_comment", "is_deleted")
-    list_filter = ("pipeline", "is_active", "requires_comment", "is_deleted")
-    search_fields = ("pipeline__code", "from_status__code", "to_status__code")
-    ordering = ("pipeline__code", "from_status__order", "to_status__order")
+    list_filter = ("is_active", "is_terminal", "is_valid", "is_deleted")
+    search_fields = ("code", "name")
+    ordering = ("order", "code")
     actions = ("restore_selected",)
 
 
@@ -73,9 +51,7 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "manager",
         "first_manager",
         "manager_outcome",
-        "transferred_to_ret_at",
         "priority",
-        "pipeline",
         "status",
         "source",
         "received_at",
@@ -87,7 +63,6 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "first_manager",
         "manager_outcome",
         "priority",
-        "pipeline",
         "status",
         "source",
         "is_deleted",
@@ -98,7 +73,6 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "email",
         "partner__code",
         "partner__name",
-        "pipeline__code",
         "status__code",
         "source__code",
         "source__name",
@@ -124,26 +98,6 @@ class LeadDepositAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     list_filter = ("type", "creator", "is_deleted")
     search_fields = ("lead__id", "lead__phone", "creator__username")
     ordering = ("-created_at",)
-    readonly_fields = ("created_at", "updated_at", "deleted_at")
-    actions = ("restore_selected",)
-
-
-@admin.register(LeadRetTransfer)
-class LeadRetTransferAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
-    list_display = (
-        "id",
-        "lead",
-        "from_manager",
-        "to_ret",
-        "transferred_by",
-        "transferred_at",
-        "is_active",
-        "rolled_back_at",
-        "is_deleted",
-    )
-    list_filter = ("is_active", "is_deleted", "to_ret", "from_manager")
-    search_fields = ("lead__id", "lead__phone", "from_manager__username", "to_ret__username")
-    ordering = ("-transferred_at",)
     readonly_fields = ("created_at", "updated_at", "deleted_at")
     actions = ("restore_selected",)
 
@@ -178,8 +132,8 @@ class LeadAuditLogAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
 
 
-@admin.register(LeadStatusIdempotencyKey)
-class LeadStatusIdempotencyKeyAdmin(admin.ModelAdmin):
+@admin.register(LeadIdempotencyKey)
+class LeadIdempotencyKeyAdmin(admin.ModelAdmin):
     list_display = ("id", "actor_user", "endpoint", "key", "response_status", "created_at", "updated_at")
     list_filter = ("endpoint", "response_status", "created_at")
     search_fields = ("actor_user__username", "key")
