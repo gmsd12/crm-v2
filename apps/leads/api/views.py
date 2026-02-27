@@ -788,6 +788,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     action_perms = {
         "list": (Perm.LEADS_READ,),
         "retrieve": (Perm.LEADS_READ,),
+        "timeline": (Perm.LEADS_READ,),
         "create": (Perm.LEADS_WRITE,),
         "update": (Perm.LEADS_WRITE,),
         "partial_update": (Perm.LEADS_WRITE,),
@@ -910,6 +911,127 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             context["last_comment_by_lead_id"] = self._build_last_comment_map_for_leads([instance.id])
         serializer = self.get_serializer(instance, context=context)
         return Response(serializer.data)
+
+    @staticmethod
+    def _timeline_status_payload(status_obj: LeadStatus | None) -> dict | None:
+        if not status_obj:
+            return None
+        return {
+            "id": str(status_obj.id),
+            "code": status_obj.code,
+            "name": status_obj.name,
+            "color": status_obj.color,
+        }
+
+    @staticmethod
+    def _timeline_actor_payload(actor_user) -> dict | None:
+        if not actor_user:
+            return None
+        return {
+            "id": str(actor_user.id),
+            "username": actor_user.username,
+            "first_name": (actor_user.first_name or "").strip(),
+            "last_name": (actor_user.last_name or "").strip(),
+            "role": actor_user.role,
+        }
+
+    @staticmethod
+    def _timeline_deposit_type_label(dep_type: int | None) -> str | None:
+        if dep_type is None:
+            return None
+        return dict(LeadDeposit.Type.choices).get(dep_type)
+
+    def _timeline_details(self, audit: LeadAuditLog) -> str:
+        payload_before = audit.payload_before if isinstance(audit.payload_before, dict) else {}
+        payload_after = audit.payload_after if isinstance(audit.payload_after, dict) else {}
+
+        if audit.event_type == LeadAuditEvent.STATUS_CHANGED:
+            from_code = getattr(audit.from_status, "code", None) or payload_before.get("status", {}).get("code")
+            to_code = getattr(audit.to_status, "code", None) or payload_after.get("status", {}).get("code")
+            if from_code and to_code:
+                return f"{from_code} -> {to_code}"
+
+        if audit.event_type in {
+            LeadAuditEvent.MANAGER_ASSIGNED,
+            LeadAuditEvent.MANAGER_REASSIGNED,
+            LeadAuditEvent.MANAGER_UNASSIGNED,
+        }:
+            before_manager = payload_before.get("manager") if isinstance(payload_before.get("manager"), dict) else {}
+            after_manager = payload_after.get("manager") if isinstance(payload_after.get("manager"), dict) else {}
+            before_name = before_manager.get("username") or "Unassigned"
+            after_name = after_manager.get("username") or "Unassigned"
+            return f"{before_name} -> {after_name}"
+
+        if audit.event_type in {LeadAuditEvent.DEPOSIT_CREATED, LeadAuditEvent.DEPOSIT_REVERSED}:
+            dep_payload = payload_after or payload_before
+            dep_type = dep_payload.get("type")
+            dep_amount = dep_payload.get("amount")
+            dep_type_label = self._timeline_deposit_type_label(dep_type) or dep_type
+            if dep_amount is not None and dep_type_label is not None:
+                return f"{dep_type_label}: {dep_amount}"
+
+        if audit.event_type in {
+            LeadAuditEvent.COMMENT_CREATED,
+            LeadAuditEvent.COMMENT_UPDATED,
+            LeadAuditEvent.COMMENT_PINNED,
+            LeadAuditEvent.COMMENT_UNPINNED,
+        }:
+            body = payload_after.get("body") if isinstance(payload_after, dict) else None
+            if isinstance(body, str) and body:
+                return body[:160]
+
+        if audit.event_type == LeadAuditEvent.RET_TRANSFERRED:
+            transfer = payload_after.get("transfer") if isinstance(payload_after.get("transfer"), dict) else {}
+            from_manager_id = transfer.get("from_manager_id")
+            target_manager_id = transfer.get("target_manager_id")
+            if from_manager_id and target_manager_id:
+                return f"manager {from_manager_id} -> {target_manager_id}"
+
+        return (audit.reason or "").strip()
+
+    def _timeline_item(self, audit: LeadAuditLog) -> dict:
+        return {
+            "id": str(audit.id),
+            "at": audit.created_at.isoformat() if audit.created_at else None,
+            "event_type": audit.event_type,
+            "event_name": audit.get_event_type_display(),
+            "entity_type": audit.entity_type,
+            "entity_id": audit.entity_id,
+            "source": audit.source,
+            "reason": audit.reason,
+            "batch_id": audit.batch_id,
+            "actor": self._timeline_actor_payload(audit.actor_user),
+            "from_status": self._timeline_status_payload(audit.from_status),
+            "to_status": self._timeline_status_payload(audit.to_status),
+            "details": self._timeline_details(audit),
+            "payload_before": audit.payload_before,
+            "payload_after": audit.payload_after,
+        }
+
+    @action(detail=True, methods=["get"], url_path="timeline")
+    def timeline(self, request, pk=None):
+        lead = self.get_object()
+        queryset = (
+            LeadAuditLog.objects.filter(lead=lead)
+            .select_related("actor_user", "from_status", "to_status")
+            .order_by("-created_at", "-id")
+        )
+
+        raw_events = (request.query_params.get("events") or "").strip()
+        if raw_events:
+            requested_events = [item.strip() for item in raw_events.split(",") if item.strip()]
+            known_events = {value for value, _label in LeadAuditEvent.choices}
+            unknown_events = sorted(set(requested_events) - known_events)
+            if unknown_events:
+                raise serializers.ValidationError(
+                    {"events": f"Unknown event types: {', '.join(unknown_events)}"}
+                )
+            queryset = queryset.filter(event_type__in=requested_events)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response([self._timeline_item(item) for item in page])
+        return Response([self._timeline_item(item) for item in queryset], status=status.HTTP_200_OK)
 
     def _assert_can_create(self):
         role = getattr(self.request.user, "role", None)
@@ -1357,6 +1479,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 from_manager=from_manager,
                 to_manager=lead.manager,
             )
+            if created_ftd:
+                _log_status_audit(
+                    event_type=LeadAuditEvent.DEPOSIT_CREATED,
+                    actor_user=transfer_author,
+                    source=LeadAuditSource.API,
+                    entity_type=LeadAuditEntity.LEAD,
+                    entity_id=str(lead.id),
+                    lead=lead,
+                    reason=reason,
+                    payload_after=_deposit_payload(dep),
+                )
             if created_comment is not None:
                 _log_status_audit(
                     event_type=LeadAuditEvent.COMMENT_CREATED,

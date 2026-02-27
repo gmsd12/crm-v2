@@ -691,6 +691,42 @@ class LeadStatusCatalogApiTests(APITestCase):
             LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.RET_TRANSFERRED).exists()
         )
 
+    def test_close_won_transfer_writes_deposit_created_audit_for_ftd(self):
+        manager = User.objects.create_user(username="manager_close_won_audit", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_close_won_audit", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Close Won Audit", code="partner-close-won-audit")
+        status_new = LeadStatus.objects.create(code="NEW_AUDIT", name="New Audit", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON_AUDIT",
+            name="Won Audit",
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+19991011", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/close-won-transfer/",
+            {"ret_manager": ret_user.id, "to_status": status_won.id, "amount": "150.00", "reason": "won + transfer"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.RET_TRANSFERRED).exists()
+        )
+        self.assertTrue(
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.MANAGER_REASSIGNED).exists()
+        )
+        deposit_log = (
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.DEPOSIT_CREATED)
+            .order_by("-id")
+            .first()
+        )
+        self.assertIsNotNone(deposit_log)
+        self.assertEqual(deposit_log.payload_after.get("type"), LeadDeposit.Type.FTD)
+        self.assertEqual(deposit_log.payload_after.get("amount"), "150.00")
+
     def test_manager_can_close_won_transfer_with_existing_ftd(self):
         manager = User.objects.create_user(username="manager_close_won_existing_ftd", password="pass12345", role=UserRole.MANAGER)
         ret_user = User.objects.create_user(username="ret_close_won_existing_ftd", password="pass12345", role=UserRole.RET)
@@ -3364,6 +3400,75 @@ class LeadStatusCatalogApiTests(APITestCase):
         self._auth(manager)
 
         response = self.client.get(f"/api/v1/leads/records/{foreign.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_lead_timeline_returns_latest_events_and_supports_filter(self):
+        admin = User.objects.create_user(username="admin_timeline_list", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_timeline_list", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Timeline", code="partner-timeline")
+        status_new = LeadStatus.objects.create(code="NEW_TIMELINE", name="New Timeline", is_default_for_new_leads=True)
+        status_work = LeadStatus.objects.create(code="WORK_TIMELINE", name="Work Timeline")
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+10031", custom_fields={})
+
+        log_status = LeadAuditLog.objects.create(
+            lead=lead,
+            event_type=LeadAuditEvent.STATUS_CHANGED,
+            from_status=status_new,
+            to_status=status_work,
+            actor_user=manager,
+            payload_before={"status": {"code": status_new.code}},
+            payload_after={"status": {"code": status_work.code}},
+        )
+        log_comment = LeadAuditLog.objects.create(
+            lead=lead,
+            event_type=LeadAuditEvent.COMMENT_CREATED,
+            actor_user=manager,
+            entity_type="lead_comment",
+            entity_id="1",
+            payload_after={"body": "Contacted customer"},
+        )
+        self._set_log_created_at(log_status, timezone.make_aware(datetime(2026, 2, 1, 10, 0, 0)))
+        self._set_log_created_at(log_comment, timezone.make_aware(datetime(2026, 2, 1, 11, 0, 0)))
+        self._auth(admin)
+
+        response = self.client.get(f"/api/v1/leads/records/{lead.id}/timeline/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(response.data["results"][0]["event_type"], LeadAuditEvent.COMMENT_CREATED)
+        self.assertEqual(response.data["results"][0]["details"], "Contacted customer")
+        self.assertEqual(response.data["results"][1]["event_type"], LeadAuditEvent.STATUS_CHANGED)
+        self.assertEqual(response.data["results"][1]["details"], "NEW_TIMELINE -> WORK_TIMELINE")
+        self.assertEqual(response.data["results"][0]["actor"]["id"], str(manager.id))
+
+        filtered_response = self.client.get(
+            f"/api/v1/leads/records/{lead.id}/timeline/",
+            {"events": LeadAuditEvent.STATUS_CHANGED},
+        )
+        self.assertEqual(filtered_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(filtered_response.data["count"], 1)
+        self.assertEqual(filtered_response.data["results"][0]["event_type"], LeadAuditEvent.STATUS_CHANGED)
+
+        invalid_response = self.client.get(
+            f"/api/v1/leads/records/{lead.id}/timeline/",
+            {"events": "unknown_event"},
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid_response.data["error"]["code"], "validation_error")
+        events_error = invalid_response.data["error"]["details"]["events"]
+        if isinstance(events_error, list):
+            events_error = events_error[0]
+        self.assertIn("Unknown event types", events_error)
+
+    def test_lead_timeline_blocks_manager_for_foreign_lead(self):
+        manager = User.objects.create_user(username="manager_timeline_self", password="pass12345", role=UserRole.MANAGER)
+        other = User.objects.create_user(username="manager_timeline_other", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Timeline Scope", code="partner-timeline-scope")
+        lead = Lead.objects.create(partner=partner, manager=other, phone="+10032", custom_fields={})
+        self._auth(manager)
+
+        response = self.client.get(f"/api/v1/leads/records/{lead.id}/timeline/")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
