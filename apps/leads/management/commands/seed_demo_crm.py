@@ -102,16 +102,16 @@ class Command(BaseCommand):
 
     def _ensure_statuses(self) -> dict[str, LeadStatus]:
         status_defs = [
-            ("NEW", "New", 10, "#3B82F6", False, False, LeadStatus.ConversionBucket.IGNORE),
-            ("CONTACTED", "Contacted", 20, "#06B6D4", False, False, LeadStatus.ConversionBucket.IGNORE),
-            ("QUALIFIED", "Qualified", 30, "#10B981", False, False, LeadStatus.ConversionBucket.IGNORE),
-            ("PROPOSAL", "Proposal", 40, "#F59E0B", False, False, LeadStatus.ConversionBucket.IGNORE),
-            ("WON", "Won", 90, "#22C55E", True, True, LeadStatus.ConversionBucket.WON),
-            ("LOST", "Lost", 100, "#EF4444", True, True, LeadStatus.ConversionBucket.LOST),
+            ("NEW", "New", 10, "#3B82F6", False, LeadStatus.ConversionBucket.IGNORE),
+            ("CONTACTED", "Contacted", 20, "#06B6D4", False, LeadStatus.ConversionBucket.IGNORE),
+            ("QUALIFIED", "Qualified", 30, "#10B981", False, LeadStatus.ConversionBucket.IGNORE),
+            ("PROPOSAL", "Proposal", 40, "#F59E0B", False, LeadStatus.ConversionBucket.IGNORE),
+            ("WON", "Won", 90, "#22C55E", True, LeadStatus.ConversionBucket.WON),
+            ("LOST", "Lost", 100, "#EF4444", True, LeadStatus.ConversionBucket.LOST),
         ]
 
         statuses: dict[str, LeadStatus] = {}
-        for code, name, order, color, is_terminal, is_valid, conversion_bucket in status_defs:
+        for code, name, order, color, is_valid, conversion_bucket in status_defs:
             status_obj, created = LeadStatus.objects.get_or_create(
                 code=code,
                 defaults={
@@ -120,7 +120,6 @@ class Command(BaseCommand):
                     "color": color,
                     "is_default_for_new_leads": False,
                     "is_active": True,
-                    "is_terminal": is_terminal,
                     "is_valid": is_valid,
                     "conversion_bucket": conversion_bucket,
                 },
@@ -136,9 +135,6 @@ class Command(BaseCommand):
                 if status_obj.color != color:
                     status_obj.color = color
                     fields_to_update.append("color")
-                if status_obj.is_terminal != is_terminal:
-                    status_obj.is_terminal = is_terminal
-                    fields_to_update.append("is_terminal")
                 if status_obj.is_valid != is_valid:
                     status_obj.is_valid = is_valid
                     fields_to_update.append("is_valid")
@@ -291,38 +287,39 @@ class Command(BaseCommand):
 
             first_manager = manager_users[lead_seq % len(manager_users)] if manager_users else None
             received_at = now - timedelta(days=(lead_seq % 30), hours=(lead_seq * 3) % 24)
-            next_contact_at = None if status_obj.is_terminal else received_at + timedelta(days=1 + (lead_seq % 5))
+            next_contact_at = (
+                None
+                if status_obj.conversion_bucket in {LeadStatus.ConversionBucket.WON, LeadStatus.ConversionBucket.LOST}
+                else received_at + timedelta(days=1 + (lead_seq % 5))
+            )
             first_assigned_at = received_at + timedelta(hours=1) if first_manager else None
-            manager_outcome = Lead.StageOutcome.PENDING
-            manager_outcome_at = None
-            manager_outcome_by = None
+            closed_at = None
+            closing_author = None
             manager = first_manager
             assigned_at = first_assigned_at
 
             if status_obj.code == "WON":
-                manager_outcome = Lead.StageOutcome.WON
-                manager_outcome_at = min(now - timedelta(minutes=5), received_at + timedelta(days=2 + (lead_seq % 5), hours=3))
+                closed_at = min(now - timedelta(minutes=5), received_at + timedelta(days=2 + (lead_seq % 5), hours=3))
                 if manager_users:
                     if first_manager and len(manager_users) > 1 and lead_seq % 3 == 0:
                         candidate = manager_users[(lead_seq + 1) % len(manager_users)]
                         if candidate.id == first_manager.id:
                             candidate = manager_users[(lead_seq + 2) % len(manager_users)]
-                        manager_outcome_by = candidate
+                        closing_author = candidate
                     else:
-                        manager_outcome_by = first_manager or manager_users[lead_seq % len(manager_users)]
+                        closing_author = first_manager or manager_users[lead_seq % len(manager_users)]
                 else:
-                    manager_outcome_by = first_manager
+                    closing_author = first_manager
 
-                if ret_users and manager_outcome_by and lead_seq % 2 == 0:
+                if ret_users and closing_author and lead_seq % 2 == 0:
                     manager = ret_users[lead_seq % len(ret_users)]
-                    assigned_at = manager_outcome_at + timedelta(hours=1)
+                    assigned_at = closed_at + timedelta(hours=1)
                 else:
-                    manager = manager_outcome_by
-                    assigned_at = manager_outcome_at
+                    manager = closing_author
+                    assigned_at = closed_at
             elif status_obj.code == "LOST":
-                manager_outcome = Lead.StageOutcome.LOST
-                manager_outcome_by = first_manager
-                manager_outcome_at = min(now - timedelta(minutes=5), received_at + timedelta(days=1 + (lead_seq % 4), hours=2))
+                closing_author = first_manager
+                closed_at = min(now - timedelta(minutes=5), received_at + timedelta(days=1 + (lead_seq % 4), hours=2))
 
             if manager is None and any_assignees:
                 manager = any_assignees[lead_seq % len(any_assignees)]
@@ -347,9 +344,6 @@ class Command(BaseCommand):
                 last_contacted_at=received_at + timedelta(hours=4) if status_obj.code != "NEW" else None,
                 assigned_at=assigned_at,
                 first_assigned_at=first_assigned_at,
-                manager_outcome=manager_outcome,
-                manager_outcome_at=manager_outcome_at,
-                manager_outcome_by=manager_outcome_by,
                 custom_fields={
                     "company": company,
                     "city": self._city_for_seq(lead_seq),
@@ -362,10 +356,10 @@ class Command(BaseCommand):
                 statuses=statuses,
                 actor_user=actor_user,
                 first_manager=first_manager,
-                manager_outcome_by=manager_outcome_by,
+                closing_author=closing_author,
                 final_manager=manager,
                 first_assigned_at=first_assigned_at,
-                manager_outcome_at=manager_outcome_at,
+                closed_at=closed_at,
                 received_at=received_at,
             )
             created += 1
@@ -379,10 +373,10 @@ class Command(BaseCommand):
         statuses: dict[str, LeadStatus],
         actor_user: User | None,
         first_manager: User | None,
-        manager_outcome_by: User | None,
+        closing_author: User | None,
         final_manager: User | None,
         first_assigned_at,
-        manager_outcome_at,
+        closed_at,
         received_at,
     ) -> None:
         def _manager_payload(user: User | None):
@@ -411,30 +405,30 @@ class Command(BaseCommand):
             )
             _update_ts(assigned_log, first_assigned_at)
 
-        if manager_outcome_by and first_manager and manager_outcome_by.id != first_manager.id and manager_outcome_at:
+        if closing_author and first_manager and closing_author.id != first_manager.id and closed_at:
             reassigned_log = LeadAuditLog.objects.create(
                 lead=lead,
                 event_type=LeadAuditEvent.MANAGER_REASSIGNED,
                 actor_user=actor_user,
                 source=LeadAuditSource.SYSTEM,
                 payload_before={"lead_id": str(lead.id), "manager": _manager_payload(first_manager)},
-                payload_after={"lead_id": str(lead.id), "manager": _manager_payload(manager_outcome_by)},
+                payload_after={"lead_id": str(lead.id), "manager": _manager_payload(closing_author)},
             )
-            _update_ts(reassigned_log, manager_outcome_at - timedelta(hours=1))
+            _update_ts(reassigned_log, closed_at - timedelta(hours=1))
 
-        if final_manager and manager_outcome_by and final_manager.id != manager_outcome_by.id and manager_outcome_at:
+        if final_manager and closing_author and final_manager.id != closing_author.id and closed_at:
             handoff_log = LeadAuditLog.objects.create(
                 lead=lead,
                 event_type=LeadAuditEvent.MANAGER_REASSIGNED,
                 actor_user=actor_user,
                 source=LeadAuditSource.SYSTEM,
-                payload_before={"lead_id": str(lead.id), "manager": _manager_payload(manager_outcome_by)},
+                payload_before={"lead_id": str(lead.id), "manager": _manager_payload(closing_author)},
                 payload_after={"lead_id": str(lead.id), "manager": _manager_payload(final_manager)},
             )
-            _update_ts(handoff_log, manager_outcome_at + timedelta(hours=1))
+            _update_ts(handoff_log, closed_at + timedelta(hours=1))
 
         if lead.status and lead.status.code != "NEW":
-            status_changed_at = manager_outcome_at or min(
+            status_changed_at = closed_at or min(
                 timezone.now() - timedelta(minutes=3),
                 received_at + timedelta(days=1, hours=2),
             )

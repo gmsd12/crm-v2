@@ -4,6 +4,7 @@ from django.db import models
 from django.utils import timezone
 from django.db.models import Q
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 from apps.core.models import BaseModel
 from apps.partners.models import Partner, PartnerSource
@@ -21,7 +22,6 @@ class LeadStatus(BaseModel):
     color = models.CharField(max_length=16, default="#6B7280")
     is_default_for_new_leads = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
-    is_terminal = models.BooleanField(default=False)
     is_valid = models.BooleanField(default=False, db_index=True)
     conversion_bucket = models.CharField(
         max_length=16,
@@ -60,11 +60,6 @@ class Lead(BaseModel):
         HIGH = 30, "High"
         URGENT = 40, "Urgent"
 
-    class StageOutcome(models.TextChoices):
-        PENDING = "PENDING", "Pending"
-        WON = "WON", "Won"
-        LOST = "LOST", "Lost"
-
     partner = models.ForeignKey(Partner, on_delete=models.PROTECT, related_name="leads")
     manager = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -87,26 +82,18 @@ class Lead(BaseModel):
     full_name = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
     email = models.EmailField(blank=True, default="", db_index=True)
-    priority = models.PositiveSmallIntegerField(choices=Priority.choices, default=Priority.NORMAL)
+    age = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        validators=[MinValueValidator(0), MaxValueValidator(99)],
+    )
+    priority = models.PositiveSmallIntegerField(choices=Priority.choices, default=Priority.NORMAL, null=True, blank=True)
     next_contact_at = models.DateTimeField(null=True, blank=True, db_index=True)
     last_contacted_at = models.DateTimeField(null=True, blank=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
     first_assigned_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    manager_outcome = models.CharField(
-        max_length=16,
-        choices=StageOutcome.choices,
-        default=StageOutcome.PENDING,
-        db_index=True,
-    )
-    manager_outcome_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    manager_outcome_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="manager_outcome_leads",
-    )
-    custom_fields = models.JSONField(default=dict, blank=True)
+    custom_fields = models.JSONField(default=dict, blank=True, null=True)
 
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
 

@@ -61,6 +61,21 @@ class AuthApiTests(APITestCase):
         self.assertEqual(refresh_after_logout.status_code, 401)
         self.assertEqual(refresh_after_logout.data["error"]["code"], "not_authenticated")
 
+    @override_settings(JWT_REFRESH_COOKIE_PATH="/")
+    def test_login_sets_persistent_refresh_cookie(self):
+        User.objects.create_user(username="manager_cookie", password="pass12345")
+
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": "manager_cookie", "password": "pass12345"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        cookie = response.cookies[settings.JWT_REFRESH_COOKIE_NAME]
+        self.assertEqual(cookie["path"], "/")
+        self.assertTrue(cookie["max-age"])
+
     def test_login_with_invalid_credentials_returns_400(self):
         User.objects.create_user(username="manager2", password="pass12345")
 
@@ -121,14 +136,14 @@ class IamUsersRBACTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 1)
 
-    def test_ret_cannot_list_users(self):
+    def test_ret_can_list_users(self):
         ret = User.objects.create_user(username="ret_user", password="pass12345", role=UserRole.RET)
         self._auth(ret)
 
         response = self.client.get("/api/v1/iam/users/")
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(response.data["results"]), 1)
 
     def test_teamleader_can_list_users(self):
         teamleader = User.objects.create_user(username="tl_read_user", password="pass12345", role=UserRole.TEAMLEADER)
@@ -138,6 +153,18 @@ class IamUsersRBACTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 1)
+
+    def test_list_users_supports_ordering(self):
+        admin = User.objects.create_user(username="admin_users_ordering", password="pass12345", role=UserRole.ADMIN)
+        User.objects.create_user(username="zz_sort_user", password="pass12345", role=UserRole.MANAGER)
+        User.objects.create_user(username="aa_sort_user", password="pass12345", role=UserRole.MANAGER)
+        self._auth(admin)
+
+        response = self.client.get("/api/v1/iam/users/", {"ordering": "username", "page_size": 200})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        usernames = [item["username"] for item in response.data["results"]]
+        self.assertLess(usernames.index("aa_sort_user"), usernames.index("zz_sort_user"))
 
     def test_teamleader_cannot_create_user(self):
         teamleader = User.objects.create_user(username="tl_user", password="pass12345", role=UserRole.TEAMLEADER)

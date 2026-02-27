@@ -33,7 +33,6 @@ class LeadStatusSerializer(serializers.ModelSerializer):
             "color",
             "is_default_for_new_leads",
             "is_active",
-            "is_terminal",
             "is_valid",
             "conversion_bucket",
             "created_at",
@@ -76,14 +75,15 @@ class LeadSerializer(serializers.ModelSerializer):
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     first_manager = serializers.SerializerMethodField()
-    manager_outcome_by = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
+    last_comment = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
         fields = [
             "id",
             "geo",
+            "age",
             "partner",
             "manager",
             "first_manager",
@@ -97,12 +97,15 @@ class LeadSerializer(serializers.ModelSerializer):
             "last_contacted_at",
             "assigned_at",
             "first_assigned_at",
-            "manager_outcome",
-            "manager_outcome_at",
-            "manager_outcome_by",
             "custom_fields",
             "received_at",
+            "last_comment",
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.context.get("include_last_comment", False):
+            self.fields.pop("last_comment", None)
 
     @staticmethod
     def _manager_like_payload(user):
@@ -117,7 +120,12 @@ class LeadSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         if not obj.status_id:
             return None
-        return {"id": str(obj.status_id), "code": obj.status.code, "name": obj.status.name}
+        return {
+            "id": str(obj.status_id),
+            "code": obj.status.code,
+            "name": obj.status.name,
+            "color": obj.status.color,
+        }
 
     def get_partner(self, obj):
         return {"id": str(obj.partner_id), "code": obj.partner.code, "name": obj.partner.name}
@@ -132,28 +140,37 @@ class LeadSerializer(serializers.ModelSerializer):
             return None
         return self._manager_like_payload(obj.first_manager)
 
-    def get_manager_outcome_by(self, obj):
-        if not obj.manager_outcome_by_id:
-            return None
-        return self._manager_like_payload(obj.manager_outcome_by)
-
     def get_source(self, obj):
         if not obj.source_id:
             return None
         return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
 
+    def get_last_comment(self, obj):
+        comments_by_lead = self.context.get("last_comment_by_lead_id", {})
+        return comments_by_lead.get(str(obj.id))
+
 
 class LeadWriteSerializer(serializers.ModelSerializer):
+    first_manager = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    first_assigned_at = serializers.DateTimeField(required=False, allow_null=True)
+
     class Meta:
         model = Lead
         fields = [
             "id",
             "partner",
             "source",
+            "first_manager",
+            "first_assigned_at",
             "geo",
             "full_name",
             "phone",
             "email",
+            "age",
             "priority",
             "next_contact_at",
             "last_contacted_at",
@@ -168,6 +185,9 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             "full_name": {"required": False, "allow_blank": True},
             "phone": {"required": False, "allow_blank": True, "validators": []},
             "email": {"required": False, "allow_blank": True},
+            "age": {"required": False, "allow_null": True},
+            "priority": {"required": False, "allow_null": True},
+            "custom_fields": {"required": False, "allow_null": True},
         }
 
     def validate(self, attrs):
@@ -196,6 +216,10 @@ class LeadWriteSerializer(serializers.ModelSerializer):
             next_contact_at = attrs["next_contact_at"]
             if timezone.is_naive(next_contact_at):
                 attrs["next_contact_at"] = timezone.make_aware(next_contact_at, timezone.get_current_timezone())
+        if "first_assigned_at" in attrs and attrs["first_assigned_at"] is not None:
+            first_assigned_at = attrs["first_assigned_at"]
+            if timezone.is_naive(first_assigned_at):
+                attrs["first_assigned_at"] = timezone.make_aware(first_assigned_at, timezone.get_current_timezone())
 
         duplicate_qs = Lead.objects.all()
         if instance:
@@ -257,9 +281,14 @@ class LeadAssignManagerSerializer(serializers.Serializer):
 
 class LeadChangeFirstManagerSerializer(serializers.Serializer):
     manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    first_assigned_at = serializers.DateTimeField(required=False)
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
     def validate(self, attrs):
+        if "first_assigned_at" in attrs and attrs["first_assigned_at"] is not None:
+            dt = attrs["first_assigned_at"]
+            if timezone.is_naive(dt):
+                attrs["first_assigned_at"] = timezone.make_aware(dt, timezone.get_current_timezone())
         attrs["reason"] = (attrs.get("reason") or "").strip()
         return attrs
 
@@ -349,9 +378,9 @@ class LeadCloseWonTransferSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=False)
-    reason = serializers.CharField(required=True, allow_blank=False, max_length=1000)
-    comment = serializers.CharField(required=False, allow_blank=False, max_length=5000)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=True)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    comment = serializers.CharField(required=False, allow_blank=True, max_length=5000)
     force_status = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
@@ -359,9 +388,6 @@ class LeadCloseWonTransferSerializer(serializers.Serializer):
         request_user = getattr(request, "user", None)
         request_role = getattr(request_user, "role", None)
 
-        ret_manager = attrs["ret_manager"]
-        if ret_manager.role not in {UserRole.RET, UserRole.ADMIN, UserRole.SUPERUSER}:
-            raise serializers.ValidationError({"ret_manager": "ret_manager must have RET, ADMIN or SUPERUSER role"})
         to_status = attrs["to_status"]
         if to_status.conversion_bucket != LeadStatus.ConversionBucket.WON:
             raise serializers.ValidationError({"to_status": "to_status must belong to WON conversion bucket"})
@@ -371,16 +397,12 @@ class LeadCloseWonTransferSerializer(serializers.Serializer):
             raise serializers.ValidationError({"transfer_author": "transfer_author must be MANAGER or TEAMLEADER"})
         if request_role == UserRole.MANAGER and transfer_author and transfer_author.id != request_user.id:
             raise serializers.ValidationError({"transfer_author": "Managers cannot override transfer_author"})
-        if request_role == UserRole.TEAMLEADER and transfer_author is None:
-            raise serializers.ValidationError({"transfer_author": "transfer_author is required for teamleaders"})
+        if request_role in {UserRole.TEAMLEADER, UserRole.ADMIN, UserRole.SUPERUSER} and transfer_author is None:
+            raise serializers.ValidationError({"transfer_author": "transfer_author is required"})
 
         attrs["reason"] = (attrs.get("reason") or "").strip()
-        if not attrs["reason"]:
-            raise serializers.ValidationError({"reason": "reason is required"})
         if "comment" in attrs:
-            attrs["comment"] = attrs["comment"].strip()
-            if not attrs["comment"]:
-                raise serializers.ValidationError({"comment": "comment cannot be blank"})
+            attrs["comment"] = (attrs.get("comment") or "").strip()
         return attrs
 
 

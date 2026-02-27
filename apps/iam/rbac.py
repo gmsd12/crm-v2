@@ -57,8 +57,10 @@ ROLE_PERMS: dict[str, set[str]] = {
         Perm.LEAD_STATUSES_READ,
     },
     UserRole.RET: {
+        Perm.IAM_USERS_READ,
         Perm.BRANDS_READ,
         Perm.LEADS_READ, Perm.LEADS_WRITE, Perm.LEADS_STATUS_WRITE,
+        Perm.LEAD_STATUSES_READ,
     },
 }
 

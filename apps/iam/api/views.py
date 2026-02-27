@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 from django.conf import settings
-from rest_framework import status, viewsets
+from rest_framework import filters as drf_filters, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -32,6 +32,8 @@ def _ensure_origin_allowed(request) -> None:
 
 
 def _set_refresh_cookie(response: Response, refresh: str) -> None:
+    refresh_ttl = settings.SIMPLE_JWT.get("REFRESH_TOKEN_LIFETIME")
+    max_age = int(refresh_ttl.total_seconds()) if refresh_ttl else None
     response.set_cookie(
         key=settings.JWT_REFRESH_COOKIE_NAME,
         value=refresh,
@@ -39,7 +41,8 @@ def _set_refresh_cookie(response: Response, refresh: str) -> None:
         secure=settings.JWT_REFRESH_COOKIE_SECURE,
         samesite=settings.JWT_REFRESH_COOKIE_SAMESITE,
         domain=settings.JWT_REFRESH_COOKIE_DOMAIN,
-        path="/api/v1/auth/",
+        path=settings.JWT_REFRESH_COOKIE_PATH,
+        max_age=max_age,
     )
 
 
@@ -47,7 +50,7 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(
         key=settings.JWT_REFRESH_COOKIE_NAME,
         domain=settings.JWT_REFRESH_COOKIE_DOMAIN,
-        path="/api/v1/auth/",
+        path=settings.JWT_REFRESH_COOKIE_PATH,
     )
 
 
@@ -150,6 +153,18 @@ class UserAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
     queryset = User.objects.all().order_by("id")
     serializer_class = UserAdminSerializer
     permission_classes = [IsAuthenticated, RBACPermission]
+    filter_backends = [drf_filters.OrderingFilter]
+    ordering = ["id"]
+    ordering_fields = [
+        "id",
+        "username",
+        "first_name",
+        "last_name",
+        "role",
+        "is_active",
+        "date_joined",
+        "last_login",
+    ]
     action_perms = {
         "list": (Perm.IAM_USERS_READ,),
         "retrieve": (Perm.IAM_USERS_READ,),

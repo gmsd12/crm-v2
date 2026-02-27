@@ -78,6 +78,7 @@ class PartnerLeadApiTests(APITestCase):
             {
                 "phone": "+19990001",
                 "geo": "ru",
+                "age": 27,
             },
             format="json",
             HTTP_X_PARTNER_TOKEN=self.raw_token,
@@ -85,8 +86,43 @@ class PartnerLeadApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["geo"], "RU")
+        self.assertEqual(response.data["age"], 27)
+        self.assertEqual(
+            set(response.data.keys()),
+            {
+                "id",
+                "source_code",
+                "geo",
+                "age",
+                "status",
+                "full_name",
+                "phone",
+                "email",
+                "priority",
+                "custom_fields",
+                "created",
+                "duplicate_rejected",
+            },
+        )
         lead = Lead.objects.get(partner=self.partner, phone="+19990001")
         self.assertEqual(lead.geo, "RU")
+        self.assertEqual(lead.age, 27)
+
+    def test_partner_can_create_lead_with_null_custom_fields(self):
+        response = self.client.post(
+            "/api/v1/partner/leads/",
+            {
+                "phone": "+19990003",
+                "custom_fields": None,
+            },
+            format="json",
+            HTTP_X_PARTNER_TOKEN=self.raw_token,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.data["custom_fields"])
+        lead = Lead.objects.get(partner=self.partner, phone="+19990003")
+        self.assertIsNone(lead.custom_fields)
 
     def test_partner_lead_with_invalid_geo_returns_400(self):
         response = self.client.post(
@@ -128,6 +164,7 @@ class PartnerLeadFilterApiTests(APITestCase):
             partner=self.partner,
             source=self.google_source,
             phone="+19990101",
+            age=21,
             custom_fields={"name": "Google Lead"},
             received_at=now - timedelta(hours=2),
         )
@@ -135,6 +172,7 @@ class PartnerLeadFilterApiTests(APITestCase):
             partner=self.partner,
             source=self.fb_source,
             phone="+19990102",
+            age=35,
             custom_fields={"name": "Facebook Lead"},
             received_at=now - timedelta(hours=1),
         )
@@ -160,14 +198,24 @@ class PartnerLeadFilterApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["id"], self.lead_google.id)
+        self.assertEqual(response.data["results"][0]["phone"], self.lead_google.phone)
+        self.assertEqual(response.data["results"][0]["source_code"], "google")
 
     def test_filter_by_phone(self):
         response = self.client.get("/api/v1/partner/leads/", {"phone": self.lead_facebook.phone}, **self.headers)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["id"], self.lead_facebook.id)
+        self.assertEqual(response.data["results"][0]["phone"], self.lead_facebook.phone)
+        self.assertEqual(response.data["results"][0]["source_code"], "facebook")
+
+    def test_filter_by_age(self):
+        response = self.client.get("/api/v1/partner/leads/", {"age": 35}, **self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["phone"], self.lead_facebook.phone)
+        self.assertEqual(response.data["results"][0]["age"], 35)
 
     def test_filter_by_received_from_and_to(self):
         response = self.client.get(
@@ -181,7 +229,21 @@ class PartnerLeadFilterApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
-        self.assertEqual(response.data["results"][0]["id"], self.lead_facebook.id)
+        self.assertEqual(response.data["results"][0]["phone"], self.lead_facebook.phone)
+
+    def test_partner_leads_list_supports_ordering(self):
+        response = self.client.get("/api/v1/partner/leads/", {"ordering": "received_at"}, **self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        phones = [item["phone"] for item in response.data["results"]]
+        self.assertEqual(
+            phones,
+            [
+                self.lead_google.phone,
+                self.lead_facebook.phone,
+                self.lead_without_source.phone,
+            ],
+        )
 
     def test_list_has_pagination_shape(self):
         response = self.client.get("/api/v1/partner/leads/", {}, **self.headers)
@@ -398,6 +460,18 @@ class InternalPartnerApiTests(APITestCase):
         su_resp = self.client.delete(f"/api/v1/partners/{partner.id}/")
         self.assertEqual(su_resp.status_code, 204)
         self.assertFalse(Partner.all_objects.filter(id=partner.id).exists())
+
+    def test_internal_partner_list_supports_ordering(self):
+        admin = self._create_user("admin_partner_ordering", UserRole.ADMIN)
+        Partner.objects.create(name="Bravo", code="bravo")
+        Partner.objects.create(name="Alpha", code="alpha")
+        self._auth(admin)
+
+        response = self.client.get("/api/v1/partners/", {"ordering": "code"})
+
+        self.assertEqual(response.status_code, 200)
+        codes = [item["code"] for item in response.data["results"][:2]]
+        self.assertEqual(codes, ["alpha", "bravo"])
 
 
 class InternalPartnerTokenApiTests(APITestCase):

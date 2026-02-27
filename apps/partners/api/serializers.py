@@ -156,6 +156,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             "id",
             "source_code",
             "geo",
+            "age",
             "full_name",
             "phone",
             "email",
@@ -167,6 +168,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         validators = []
         extra_kwargs = {
             "phone": {"validators": []},
+            "custom_fields": {"required": False, "allow_null": True},
         }
 
     def validate(self, attrs):
@@ -299,30 +301,35 @@ class LeadCreateSerializer(serializers.ModelSerializer):
 
 
 class LeadListSerializer(serializers.ModelSerializer):
-    source = serializers.SerializerMethodField()
+    source_code = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
         fields = [
             "id",
+            "source_code",
             "geo",
+            "age",
             "status",
-            "source",
             "full_name",
             "phone",
             "email",
             "priority",
             "custom_fields",
-            "received_at",
         ]
 
-    def get_source(self, obj):
+    def get_source_code(self, obj):
         if not obj.source_id:
             return None
-        return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
+        return obj.source.code
 
     def get_status(self, obj):
         if not obj.status_id:
             return None
-        return {"id": str(obj.status_id), "code": obj.status.code, "name": obj.status.name}
+        return {
+            "id": str(obj.status_id),
+            "code": obj.status.code,
+            "name": obj.status.name,
+            "color": obj.status.color,
+        }

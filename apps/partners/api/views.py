@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rest_framework import mixins, viewsets, status
+from rest_framework import filters as drf_filters, mixins, viewsets, status
 from django_filters.rest_framework import FilterSet, filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.decorators import action
@@ -30,6 +30,9 @@ class PartnerSourceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     authentication_classes = [PartnerTokenAuthentication]
     permission_classes = [IsPartnerAuthenticated]
     serializer_class = PartnerSourceSerializer
+    filter_backends = [drf_filters.OrderingFilter]
+    ordering = ["code"]
+    ordering_fields = ["id", "code", "name", "created_at", "updated_at"]
 
     def get_queryset(self):
         partner = self.request.partner_auth.partner
@@ -48,7 +51,7 @@ class _BasePartnerCatalogAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "restore": (Perm.BRANDS_WRITE,),
         "destroy": (Perm.BRANDS_HARD_DELETE,),
     }
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
 
     def perform_destroy(self, instance):
         instance.hard_delete()
@@ -69,6 +72,8 @@ class _BasePartnerCatalogAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
 class PartnerAdminViewSet(_BasePartnerCatalogAdminViewSet):
     serializer_class = PartnerAdminSerializer
     filterset_fields = ["is_active", "code", "name"]
+    ordering = ["code"]
+    ordering_fields = ["id", "code", "name", "is_active", "created_at", "updated_at"]
 
     def get_queryset(self):
         if self.action in {"restore"}:
@@ -79,6 +84,17 @@ class PartnerAdminViewSet(_BasePartnerCatalogAdminViewSet):
 class PartnerSourceAdminViewSet(_BasePartnerCatalogAdminViewSet):
     serializer_class = PartnerSourceAdminSerializer
     filterset_fields = ["partner", "is_active", "code"]
+    ordering = ["partner__code", "code"]
+    ordering_fields = [
+        "id",
+        "partner__code",
+        "partner__name",
+        "code",
+        "name",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ]
 
     def get_queryset(self):
         if self.action in {"restore"}:
@@ -89,6 +105,18 @@ class PartnerSourceAdminViewSet(_BasePartnerCatalogAdminViewSet):
 class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
     serializer_class = PartnerTokenAdminSerializer
     filterset_fields = ["partner", "source", "is_active", "name"]
+    ordering = ["-created_at"]
+    ordering_fields = [
+        "id",
+        "created_at",
+        "updated_at",
+        "partner__code",
+        "name",
+        "source__code",
+        "is_active",
+        "expires_at",
+        "last_used_at",
+    ]
 
     def get_queryset(self):
         if self.action in {"restore"}:
@@ -99,6 +127,7 @@ class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
 class LeadFilter(FilterSet):
     source = filters.CharFilter(method="filter_source")
     phone = filters.CharFilter(field_name="phone", lookup_expr="exact")
+    age = filters.NumberFilter(field_name="age", lookup_expr="exact")
     received_from = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="gte")
     received_to = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="lte")
 
@@ -111,7 +140,7 @@ class LeadFilter(FilterSet):
 
     class Meta:
         model = Lead
-        fields = ["phone"]
+        fields = ["phone", "age"]
 
 
 class PartnerLeadViewSet(
@@ -124,8 +153,19 @@ class PartnerLeadViewSet(
     permission_classes = [IsPartnerAuthenticated]
     throttle_classes = [PartnerTokenRateThrottle]
     pagination_class = PartnerLeadPagination
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_class = LeadFilter
-    ordering_fields = ["received_at"]
+    ordering_fields = [
+        "id",
+        "received_at",
+        "age",
+        "phone",
+        "full_name",
+        "email",
+        "priority",
+        "source__code",
+        "status__code",
+    ]
     ordering = ["-received_at"]
 
     def get_queryset(self):

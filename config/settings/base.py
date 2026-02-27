@@ -142,6 +142,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.DefaultPageNumberPagination",
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.OrderingFilter",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "partner_token": PARTNER_API_THROTTLE_RATE,
@@ -159,6 +160,7 @@ JWT_REFRESH_COOKIE_DOMAIN = env("JWT_REFRESH_COOKIE_DOMAIN", default=None)  # "a
 JWT_REFRESH_COOKIE_SAMESITE = env("JWT_REFRESH_COOKIE_SAMESITE", default="Lax")  # Lax для subdomain OK
 JWT_REFRESH_COOKIE_SECURE = env.bool("JWT_REFRESH_COOKIE_SECURE", default=not DEBUG)
 JWT_REFRESH_COOKIE_HTTPONLY = True
+JWT_REFRESH_COOKIE_PATH = env("JWT_REFRESH_COOKIE_PATH", default="/")
 
 # drf-spectacular
 SPECTACULAR_SETTINGS = {

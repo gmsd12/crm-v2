@@ -6,14 +6,14 @@ import uuid
 from datetime import datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
-from django.db import transaction
-from django.db.models import Count, F, Q
+from django.db import IntegrityError, transaction
+from django.db.models import Count, F, OuterRef, Q, Subquery
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django_filters import rest_framework as django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
-from rest_framework import serializers, status, viewsets
+from rest_framework import filters as drf_filters, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
@@ -71,7 +71,6 @@ def _status_payload(status_obj: LeadStatus | None) -> dict | None:
         "color": status_obj.color,
         "is_default_for_new_leads": status_obj.is_default_for_new_leads,
         "is_active": status_obj.is_active,
-        "is_terminal": status_obj.is_terminal,
         "is_valid": status_obj.is_valid,
         "conversion_bucket": status_obj.conversion_bucket,
         "is_deleted": status_obj.is_deleted,
@@ -104,6 +103,7 @@ def _lead_payload(lead: Lead | None) -> dict | None:
         "source_id": str(lead.source_id) if lead.source_id else None,
         "status_id": str(lead.status_id) if lead.status_id else None,
         "geo": lead.geo,
+        "age": lead.age,
         "full_name": lead.full_name,
         "phone": lead.phone,
         "email": lead.email,
@@ -112,11 +112,8 @@ def _lead_payload(lead: Lead | None) -> dict | None:
         "last_contacted_at": lead.last_contacted_at.isoformat() if lead.last_contacted_at else None,
         "assigned_at": lead.assigned_at.isoformat() if lead.assigned_at else None,
         "first_assigned_at": lead.first_assigned_at.isoformat() if lead.first_assigned_at else None,
-        "manager_outcome": lead.manager_outcome,
-        "manager_outcome_at": lead.manager_outcome_at.isoformat() if lead.manager_outcome_at else None,
-        "manager_outcome_by_id": str(lead.manager_outcome_by_id) if lead.manager_outcome_by_id else None,
         "received_at": lead.received_at.isoformat() if lead.received_at else None,
-        "custom_fields": lead.custom_fields or {},
+        "custom_fields": lead.custom_fields,
         "is_deleted": bool(getattr(lead, "is_deleted", False)),
         "deleted_at": lead.deleted_at.isoformat() if getattr(lead, "deleted_at", None) else None,
     }
@@ -151,6 +148,14 @@ def _deposit_payload(dep: LeadDeposit | None) -> dict | None:
     }
 
 
+def _deposit_unique_conflict_error(dep_type: int):
+    if dep_type == LeadDeposit.Type.FTD:
+        return serializers.ValidationError({"type": "FTD already exists for this lead"})
+    if dep_type == LeadDeposit.Type.RELOAD:
+        return serializers.ValidationError({"type": "Reload already exists for this lead"})
+    return serializers.ValidationError({"type": "Deposit type conflict for this lead"})
+
+
 def _status_conversion_bucket(status_obj: LeadStatus | None) -> str:
     if not status_obj:
         return LeadStatus.ConversionBucket.IGNORE
@@ -182,20 +187,10 @@ def _set_first_manager_if_needed(lead: Lead, *, update_fields: list[str]) -> Non
         update_fields.append("first_assigned_at")
 
 
-def _apply_manager_outcome_if_needed(lead: Lead, *, to_status: LeadStatus, actor_user, update_fields: list[str]) -> None:
-    bucket = _status_conversion_bucket(to_status)
-    if lead.manager_outcome != Lead.StageOutcome.PENDING:
-        return
-    if bucket not in {LeadStatus.ConversionBucket.WON, LeadStatus.ConversionBucket.LOST}:
-        return
-    lead.manager_outcome = Lead.StageOutcome.WON if bucket == LeadStatus.ConversionBucket.WON else Lead.StageOutcome.LOST
-    lead.manager_outcome_at = timezone.now()
-    lead.manager_outcome_by = actor_user
-    update_fields.extend(["manager_outcome", "manager_outcome_at", "manager_outcome_by"])
-
-
-def _is_manager_won_locked(lead: Lead) -> bool:
-    return lead.manager_outcome == Lead.StageOutcome.WON
+def _touch_lead_last_contacted(lead: Lead, *, at: datetime | None = None) -> None:
+    contact_dt = at or timezone.now()
+    lead.last_contacted_at = contact_dt
+    lead.save(update_fields=["last_contacted_at", "updated_at"])
 
 
 def _next_deposit_type(lead: Lead, *, actor_role: str | None = None) -> int:
@@ -219,11 +214,38 @@ def _next_deposit_type(lead: Lead, *, actor_role: str | None = None) -> int:
 
 
 def _resolve_rollback_manager(lead: Lead):
-    outcome_author = getattr(lead, "manager_outcome_by", None)
-    if outcome_author and getattr(outcome_author, "role", None) in {UserRole.MANAGER, UserRole.TEAMLEADER}:
-        return outcome_author
+    candidate_ids: list[int] = []
+    transfer_log = (
+        LeadAuditLog.objects.filter(
+            lead=lead,
+            event_type=LeadAuditEvent.RET_TRANSFERRED,
+        )
+        .order_by("-created_at", "-id")
+        .first()
+    )
+    if transfer_log and isinstance(transfer_log.payload_after, dict):
+        transfer_payload = transfer_log.payload_after.get("transfer")
+        if isinstance(transfer_payload, dict):
+            from_manager_id = transfer_payload.get("from_manager_id")
+            transfer_author_id = transfer_payload.get("transfer_author_id")
+            for raw_id in (from_manager_id, transfer_author_id):
+                try:
+                    parsed = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                candidate_ids.append(parsed)
+
     if lead.first_manager_id:
-        return lead.first_manager
+        candidate_ids.append(int(lead.first_manager_id))
+
+    seen: set[int] = set()
+    for candidate_id in candidate_ids:
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        candidate = User.objects.filter(id=candidate_id, is_active=True).first()
+        if candidate and candidate.role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
+            return candidate
     return None
 
 
@@ -383,13 +405,25 @@ class BaseStatusCatalogViewSet(RBACActionMixin, viewsets.ModelViewSet):
 class LeadStatusViewSet(BaseStatusCatalogViewSet):
     queryset = LeadStatus.objects.all().order_by("order", "code")
     serializer_class = LeadStatusSerializer
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_fields = [
         "is_active",
-        "is_terminal",
         "is_valid",
         "conversion_bucket",
         "is_default_for_new_leads",
+    ]
+    ordering = ["order", "code"]
+    ordering_fields = [
+        "id",
+        "order",
+        "code",
+        "name",
+        "is_active",
+        "is_valid",
+        "conversion_bucket",
+        "is_default_for_new_leads",
+        "created_at",
+        "updated_at",
     ]
 
     def perform_create(self, serializer):
@@ -484,7 +518,7 @@ class LeadAuditLogViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
         "list": (Perm.LEAD_STATUSES_READ,),
         "retrieve": (Perm.LEAD_STATUSES_READ,),
     }
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_fields = [
         "lead",
         "entity_type",
@@ -495,6 +529,18 @@ class LeadAuditLogViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
         "actor_user",
         "source",
         "batch_id",
+    ]
+    ordering = ["-created_at"]
+    ordering_fields = [
+        "id",
+        "created_at",
+        "event_type",
+        "entity_type",
+        "entity_id",
+        "source",
+        "batch_id",
+        "lead__id",
+        "actor_user__username",
     ]
 
 
@@ -510,10 +556,6 @@ class RoleInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
     pass
 
 
-class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
-    pass
-
-
 class LeadRecordFilter(django_filters.FilterSet):
     id__in = IdInFilter(field_name="id", lookup_expr="in")
     partner__in = IdInFilter(field_name="partner_id", lookup_expr="in")
@@ -526,9 +568,10 @@ class LeadRecordFilter(django_filters.FilterSet):
     source__in = IdInFilter(field_name="source_id", lookup_expr="in")
     status_code = django_filters.CharFilter(field_name="status__code", lookup_expr="iexact")
     status__in = IdInFilter(field_name="status_id", lookup_expr="in")
-    manager_outcome__in = CharInFilter(field_name="manager_outcome", lookup_expr="in")
-    manager_outcome_by__in = NumberInFilter(field_name="manager_outcome_by_id", lookup_expr="in")
     priority__in = NumberInFilter(field_name="priority", lookup_expr="in")
+    age__in = NumberInFilter(field_name="age", lookup_expr="in")
+    age_from = django_filters.NumberFilter(field_name="age", lookup_expr="gte")
+    age_to = django_filters.NumberFilter(field_name="age", lookup_expr="lte")
     full_name = django_filters.CharFilter(field_name="full_name", lookup_expr="icontains")
     phone__icontains = django_filters.CharFilter(field_name="phone", lookup_expr="icontains")
     email__icontains = django_filters.CharFilter(field_name="email", lookup_expr="icontains")
@@ -540,11 +583,8 @@ class LeadRecordFilter(django_filters.FilterSet):
     first_assigned_to = django_filters.IsoDateTimeFilter(field_name="first_assigned_at", lookup_expr="lte")
     next_contact_from = django_filters.IsoDateTimeFilter(field_name="next_contact_at", lookup_expr="gte")
     next_contact_to = django_filters.IsoDateTimeFilter(field_name="next_contact_at", lookup_expr="lte")
-    manager_outcome_from = django_filters.IsoDateTimeFilter(field_name="manager_outcome_at", lookup_expr="gte")
-    manager_outcome_to = django_filters.IsoDateTimeFilter(field_name="manager_outcome_at", lookup_expr="lte")
     is_unassigned = django_filters.BooleanFilter(field_name="manager_id", lookup_expr="isnull")
     has_next_contact = django_filters.BooleanFilter(method="filter_has_next_contact")
-    has_manager_outcome_at = django_filters.BooleanFilter(method="filter_has_manager_outcome_at")
     has_email = django_filters.BooleanFilter(method="filter_has_email")
     has_phone = django_filters.BooleanFilter(method="filter_has_phone")
 
@@ -568,10 +608,6 @@ class LeadRecordFilter(django_filters.FilterSet):
             "status",
             "status_code",
             "status__in",
-            "manager_outcome",
-            "manager_outcome__in",
-            "manager_outcome_by",
-            "manager_outcome_by__in",
             "geo",
             "phone",
             "phone__icontains",
@@ -580,6 +616,10 @@ class LeadRecordFilter(django_filters.FilterSet):
             "full_name",
             "priority",
             "priority__in",
+            "age",
+            "age__in",
+            "age_from",
+            "age_to",
             "received_at",
             "received_from",
             "received_to",
@@ -592,21 +632,14 @@ class LeadRecordFilter(django_filters.FilterSet):
             "next_contact_at",
             "next_contact_from",
             "next_contact_to",
-            "manager_outcome_at",
-            "manager_outcome_from",
-            "manager_outcome_to",
             "is_unassigned",
             "has_next_contact",
-            "has_manager_outcome_at",
             "has_email",
             "has_phone",
         ]
 
     def filter_has_next_contact(self, queryset, name, value):
         return queryset.filter(next_contact_at__isnull=not value)
-
-    def filter_has_manager_outcome_at(self, queryset, name, value):
-        return queryset.filter(manager_outcome_at__isnull=not value)
 
     def filter_has_email(self, queryset, name, value):
         if value:
@@ -640,8 +673,17 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "destroy": (Perm.LEADS_WRITE,),
         "restore": (Perm.LEADS_WRITE,),
     }
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_class = LeadCommentFilter
+    ordering = ["-is_pinned", "-created_at"]
+    ordering_fields = [
+        "id",
+        "lead__id",
+        "author__username",
+        "is_pinned",
+        "created_at",
+        "updated_at",
+    ]
 
     def _assert_write_allowed(self, instance: LeadComment):
         role = getattr(self.request.user, "role", None)
@@ -652,6 +694,7 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         comment = serializer.save(author=self.request.user)
+        _touch_lead_last_contacted(comment.lead, at=comment.created_at)
         _log_status_audit(
             event_type=LeadAuditEvent.COMMENT_CREATED,
             actor_user=self.request.user,
@@ -723,7 +766,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "partner",
         "manager",
         "first_manager",
-        "manager_outcome_by",
         "source",
         "status",
     ).all().order_by("-received_at")
@@ -741,6 +783,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "phone",
         "email",
         "source",
+        "custom_fields",
     }
     action_perms = {
         "list": (Perm.LEADS_READ,),
@@ -763,8 +806,31 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "rollback_ret_transfer": (Perm.LEADS_WRITE,),
         "deposits": (Perm.LEADS_WRITE,),
     }
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_class = LeadRecordFilter
+    ordering = ["-received_at"]
+    ordering_fields = [
+        "id",
+        "received_at",
+        "created_at",
+        "updated_at",
+        "assigned_at",
+        "first_assigned_at",
+        "next_contact_at",
+        "last_contacted_at",
+        "priority",
+        "age",
+        "full_name",
+        "phone",
+        "email",
+        "geo",
+        "partner__code",
+        "manager__username",
+        "first_manager__username",
+        "status__order",
+        "status__code",
+        "source__code",
+    ]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -775,6 +841,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(manager_id=self.request.user.id)
                 | Q(manager__role=UserRole.MANAGER)
+                | Q(manager__role=UserRole.TEAMLEADER)
                 | Q(manager__isnull=True)
             )
         return queryset
@@ -783,6 +850,66 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if self.action in {"create", "update", "partial_update"}:
             return LeadWriteSerializer
         return LeadSerializer
+
+    def _include_last_comment_requested(self) -> bool:
+        raw = (self.request.query_params.get("include_last_comment") or "").strip().lower()
+        return raw in {"1", "true", "yes", "y", "on"}
+
+    def _build_last_comment_map_for_leads(self, lead_ids: list[int]) -> dict[str, dict]:
+        if not lead_ids:
+            return {}
+
+        latest_comment_id = (
+            LeadComment.objects.filter(lead_id=OuterRef("lead_id"), is_deleted=False)
+            .order_by("-created_at", "-id")
+            .values("id")[:1]
+        )
+        comments = (
+            LeadComment.objects.filter(lead_id__in=lead_ids, is_deleted=False)
+            .filter(id=Subquery(latest_comment_id))
+            .select_related("author")
+        )
+
+        result: dict[str, dict] = {}
+        for comment in comments:
+            result[str(comment.lead_id)] = {
+                "id": str(comment.id),
+                "body": comment.body,
+                "is_pinned": comment.is_pinned,
+                "created_at": comment.created_at.isoformat() if comment.created_at else None,
+                "author": _manager_payload(comment.author),
+            }
+        return result
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        include_last_comment = self._include_last_comment_requested()
+
+        if page is not None:
+            context = self.get_serializer_context()
+            context["include_last_comment"] = include_last_comment
+            if include_last_comment:
+                context["last_comment_by_lead_id"] = self._build_last_comment_map_for_leads([lead.id for lead in page])
+            serializer = self.get_serializer(page, many=True, context=context)
+            return self.get_paginated_response(serializer.data)
+
+        context = self.get_serializer_context()
+        context["include_last_comment"] = include_last_comment
+        if include_last_comment:
+            context["last_comment_by_lead_id"] = self._build_last_comment_map_for_leads([lead.id for lead in queryset])
+        serializer = self.get_serializer(queryset, many=True, context=context)
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        include_last_comment = self._include_last_comment_requested()
+        context = self.get_serializer_context()
+        context["include_last_comment"] = include_last_comment
+        if include_last_comment:
+            context["last_comment_by_lead_id"] = self._build_last_comment_map_for_leads([instance.id])
+        serializer = self.get_serializer(instance, context=context)
+        return Response(serializer.data)
 
     def _assert_can_create(self):
         role = getattr(self.request.user, "role", None)
@@ -797,9 +924,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if lead.manager_id == self.request.user.id:
                 return
             lead_manager_role = getattr(getattr(lead, "manager", None), "role", None)
-            if lead_manager_role == UserRole.MANAGER:
+            if lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can edit only own leads and manager leads")
+            raise PermissionDenied("Teamleaders can edit only own leads and manager/teamleader leads")
 
     def _assert_can_manage_assignment(self, lead: Lead, *, operation: str):
         role = getattr(self.request.user, "role", None)
@@ -810,14 +937,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         lead_manager_role = getattr(lead_manager, "role", None)
 
         if operation == "assign":
-            if lead.manager_id is None or lead_manager_role == UserRole.MANAGER:
+            if lead.manager_id is None or lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can assign only unassigned leads or manager leads")
+            raise PermissionDenied("Teamleaders can assign only unassigned leads or manager/teamleader leads")
 
         if operation == "unassign":
-            if lead_manager_role == UserRole.MANAGER:
+            if lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can unassign only leads assigned to managers")
+            raise PermissionDenied("Teamleaders can unassign only leads assigned to managers/teamleaders")
 
         if lead.manager_id is None:
             return
@@ -825,9 +952,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     def _assert_can_change_first_manager(self):
         role = getattr(self.request.user, "role", None)
+        if role in {UserRole.SUPERUSER, UserRole.ADMIN, UserRole.TEAMLEADER}:
+            return
+        raise PermissionDenied("Only teamleaders, admins and superusers can change first_manager")
+
+    def _assert_can_change_first_manager_for_lead(self, lead: Lead):
+        role = getattr(self.request.user, "role", None)
         if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
             return
-        raise PermissionDenied("Only admins and superusers can change first_manager")
+        if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
+            return
+        raise PermissionDenied("Teamleaders can change first_manager only for manager/teamleader leads")
 
     def _assert_update_payload_allowed(self, lead: Lead):
         role = getattr(self.request.user, "role", None)
@@ -847,6 +982,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     f"Managers and RET cannot edit protected fields: {', '.join(forbidden)}"
                 )
 
+        if payload_fields & {"first_manager", "first_assigned_at"}:
+            self._assert_can_change_first_manager()
+            self._assert_can_change_first_manager_for_lead(lead)
+
         if "next_contact_at" in payload_fields:
             if role in {UserRole.MANAGER, UserRole.RET} and lead.manager_id != self.request.user.id:
                 raise PermissionDenied("You can set next_contact_at only for your own leads")
@@ -855,14 +994,18 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     return
                 manager = getattr(lead, "manager", None)
                 manager_role = getattr(manager, "role", None)
-                if manager is None or manager_role != UserRole.MANAGER:
-                    raise PermissionDenied("Teamleaders can set next_contact_at only for own and manager leads")
+                if manager is None or manager_role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
+                    raise PermissionDenied(
+                        "Teamleaders can set next_contact_at only for own and manager/teamleader leads"
+                    )
 
     def _assert_create_payload_allowed(self):
         role = getattr(self.request.user, "role", None)
         payload_fields = set(self.request.data.keys())
         if role != UserRole.SUPERUSER and "geo" in payload_fields:
             raise PermissionDenied("Only superusers can set geo on create")
+        if role != UserRole.SUPERUSER and "custom_fields" in payload_fields:
+            raise PermissionDenied("Only superusers can set custom_fields on create")
 
     def _assert_bulk_status_change_allowed(self, leads: list[Lead]):
         role = getattr(self.request.user, "role", None)
@@ -879,17 +1022,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if lead.manager_id == self.request.user.id:
                 continue
             lead_manager_role = getattr(getattr(lead, "manager", None), "role", None)
-            if lead_manager_role == UserRole.MANAGER:
+            if lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 continue
             forbidden_ids.append(str(lead.id))
         if forbidden_ids:
-            raise PermissionDenied("Teamleaders can change status only for own and manager leads")
+            raise PermissionDenied("Teamleaders can change status only for own and manager/teamleader leads")
 
     def _teamleader_can_manage_manager_scope(self, lead: Lead) -> bool:
         if lead.manager_id == self.request.user.id:
             return True
         lead_manager_role = getattr(getattr(lead, "manager", None), "role", None)
-        return lead_manager_role == UserRole.MANAGER
+        return lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}
 
     def _assert_can_force_status_change(self, *, lead: Lead):
         role = getattr(self.request.user, "role", None)
@@ -897,7 +1040,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             return
         if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
             return
-        raise PermissionDenied("Only teamleaders (own/manager leads), admins, and superusers can use force status change")
+        raise PermissionDenied(
+            "Only teamleaders (own/manager/teamleader leads), admins, and superusers can use force status change"
+        )
 
     def _assert_can_transfer_to_ret(self, *, lead: Lead):
         role = getattr(self.request.user, "role", None)
@@ -906,7 +1051,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role == UserRole.TEAMLEADER:
             if self._teamleader_can_manage_manager_scope(lead):
                 return
-            raise PermissionDenied("Teamleaders can handoff only own and manager leads")
+            raise PermissionDenied("Teamleaders can handoff only own and manager/teamleader leads")
         if role == UserRole.MANAGER and lead.manager_id == self.request.user.id:
             return
         raise PermissionDenied("You cannot handoff this lead")
@@ -1094,12 +1239,20 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role == UserRole.RET and dep_type == LeadDeposit.Type.FTD:
             raise serializers.ValidationError({"type": "RET cannot create FTD"})
 
-        dep = LeadDeposit.objects.create(
-            lead=lead,
-            creator=request.user,
-            amount=serializer.validated_data["amount"],
-            type=dep_type,
-        )
+        if dep_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
+            if LeadDeposit.objects.filter(lead=lead, type=dep_type, is_deleted=False).exists():
+                raise _deposit_unique_conflict_error(dep_type)
+
+        try:
+            dep = LeadDeposit.objects.create(
+                lead=lead,
+                creator=request.user,
+                amount=serializer.validated_data["amount"],
+                type=dep_type,
+            )
+        except IntegrityError:
+            raise _deposit_unique_conflict_error(dep_type)
+        _touch_lead_last_contacted(lead, at=dep.created_at)
         _log_status_audit(
             event_type=LeadAuditEvent.DEPOSIT_CREATED,
             actor_user=request.user,
@@ -1117,7 +1270,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         serializer = LeadCloseWonTransferSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         to_status = serializer.validated_data["to_status"]
-        reason = serializer.validated_data["reason"]
+        reason = serializer.validated_data.get("reason", "")
         comment_body = serializer.validated_data.get("comment")
         force_status = serializer.validated_data.get("force_status", False)
         requested_transfer_author = serializer.validated_data.get("transfer_author")
@@ -1154,29 +1307,23 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             now = timezone.now()
             dep = existing_deposits.filter(type=LeadDeposit.Type.FTD).first()
+            created_ftd = False
             if dep is None:
-                if "amount" not in serializer.validated_data:
-                    raise serializers.ValidationError({"amount": "amount is required when FTD does not exist"})
                 dep = LeadDeposit.objects.create(
                     lead=lead,
                     creator=transfer_author,
                     amount=serializer.validated_data["amount"],
                     type=LeadDeposit.Type.FTD,
                 )
+                created_ftd = True
             elif existing_deposits.filter(type=LeadDeposit.Type.FTD).count() > 1:
                 raise serializers.ValidationError("Cannot transfer to RET: multiple FTD records found")
 
             before = _lead_payload(lead)
-            lead.manager_outcome = Lead.StageOutcome.WON
-            lead.manager_outcome_at = now
-            lead.manager_outcome_by = transfer_author
             lead.manager = serializer.validated_data["ret_manager"]
             lead.assigned_at = now
 
             update_fields = [
-                "manager_outcome",
-                "manager_outcome_at",
-                "manager_outcome_by",
                 "manager",
                 "assigned_at",
                 "updated_at",
@@ -1192,6 +1339,15 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     author=request.user,
                     body=comment_body,
                 )
+            contact_dt = None
+            if created_ftd:
+                contact_dt = dep.created_at
+            if created_comment is not None:
+                comment_created_at = created_comment.created_at
+                if contact_dt is None or comment_created_at > contact_dt:
+                    contact_dt = comment_created_at
+            if contact_dt is not None:
+                _touch_lead_last_contacted(lead, at=contact_dt)
 
             _log_manager_audit(
                 lead=lead,
@@ -1252,7 +1408,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         with transaction.atomic():
             lead = (
                 Lead.objects.select_for_update()
-                .select_related("manager", "first_manager", "manager_outcome_by")
+                .select_related("manager", "first_manager")
                 .get(id=pk)
             )
             if getattr(getattr(lead, "manager", None), "role", None) not in {
@@ -1280,16 +1436,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             rollback_ts = timezone.now()
             lead.manager = rollback_manager
             lead.assigned_at = rollback_ts
-            lead.manager_outcome = Lead.StageOutcome.PENDING
-            lead.manager_outcome_at = None
-            lead.manager_outcome_by = None
             lead.save(
                 update_fields=[
                     "manager",
                     "assigned_at",
-                    "manager_outcome",
-                    "manager_outcome_at",
-                    "manager_outcome_by",
                     "updated_at",
                 ]
             )
@@ -1360,16 +1510,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             leads_received_qs = leads_received_qs.filter(first_manager=manager_scope)
 
         valid_status_filter = Q(status__is_valid=True)
-        won_manager_outcome_filter = Q(manager_outcome=Lead.StageOutcome.WON)
-        lost_manager_outcome_filter = Q(manager_outcome=Lead.StageOutcome.LOST)
-        won_status_fallback_filter = Q(
-            manager_outcome=Lead.StageOutcome.PENDING,
-            status__conversion_bucket=LeadStatus.ConversionBucket.WON,
-        )
-        lost_status_fallback_filter = Q(
-            manager_outcome=Lead.StageOutcome.PENDING,
-            status__conversion_bucket=LeadStatus.ConversionBucket.LOST,
-        )
+        lost_status_filter = Q(status__conversion_bucket=LeadStatus.ConversionBucket.LOST)
 
         def _rate(numerator: int, denominator: int) -> float:
             if not denominator:
@@ -1385,6 +1526,19 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if partner_filter:
                 partner_leads_received_qs = partner_leads_received_qs.filter(partner=partner_filter)
 
+            partner_ftd_qs = LeadDeposit.objects.filter(
+                type=LeadDeposit.Type.FTD,
+                is_deleted=False,
+                created_at__gte=period_start,
+                created_at__lt=period_end,
+            )
+            if partner:
+                partner_ftd_qs = partner_ftd_qs.filter(lead__partner=partner)
+            if partner_filter:
+                partner_ftd_qs = partner_ftd_qs.filter(lead__partner=partner_filter)
+            if manager_scope:
+                partner_ftd_qs = partner_ftd_qs.filter(lead__first_manager=manager_scope)
+
             total = partner_leads_received_qs.count()
             leads_in_status = list(
                 partner_leads_received_qs.exclude(status__isnull=True)
@@ -1394,18 +1548,32 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             )
             valid_count = partner_leads_received_qs.filter(valid_status_filter).count()
             invalid_count = max(total - valid_count, 0)
-            won_count = partner_leads_received_qs.filter(won_manager_outcome_filter | won_status_fallback_filter).count()
-            lost_count = partner_leads_received_qs.filter(lost_manager_outcome_filter | lost_status_fallback_filter).count()
+            won_count = partner_ftd_qs.values("lead_id").distinct().count()
+            lost_count = partner_leads_received_qs.filter(lost_status_filter).count()
             same_day_won_count = (
-                partner_leads_received_qs.filter(
-                    won_manager_outcome_filter & Q(manager_outcome_at__isnull=False)
+                partner_ftd_qs.filter(
+                    lead__received_at__gte=period_start,
+                    lead__received_at__lt=period_end,
                 )
                 .annotate(
-                    received_date=TruncDate("received_at"),
-                    outcome_date=TruncDate("manager_outcome_at"),
+                    received_date=TruncDate("lead__received_at"),
+                    ftd_date=TruncDate("created_at"),
                 )
-                .filter(received_date=F("outcome_date"))
+                .filter(received_date=F("ftd_date"))
+                .values("lead_id")
+                .distinct()
                 .count()
+            )
+            won_by_manager_rows = list(
+                partner_ftd_qs.values(
+                    "creator_id",
+                    "creator__username",
+                    "creator__first_name",
+                    "creator__last_name",
+                    "creator__role",
+                )
+                .annotate(won_total=Count("id"))
+                .order_by("-won_total", "creator__username", "creator_id")
             )
 
             valid_rate = _rate(valid_count, total)
@@ -1426,6 +1594,28 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                         "count": row["count"],
                         "rate": status_rate,
                         "percent": _percent(status_rate),
+                    }
+                )
+            won_by_manager = []
+            for row in won_by_manager_rows:
+                creator_id = row["creator_id"]
+                if creator_id is None:
+                    manager_payload = None
+                else:
+                    manager_payload = {
+                        "id": str(creator_id),
+                        "username": row["creator__username"],
+                        "first_name": (row["creator__first_name"] or "").strip(),
+                        "last_name": (row["creator__last_name"] or "").strip(),
+                        "role": row["creator__role"],
+                    }
+                manager_won_rate = _rate(row["won_total"], won_count)
+                won_by_manager.append(
+                    {
+                        "manager": manager_payload,
+                        "won_total": row["won_total"],
+                        "won_rate": manager_won_rate,
+                        "won_percent": _percent(manager_won_rate),
                     }
                 )
 
@@ -1457,6 +1647,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                         "percent": _percent(conversion_cohort_rate),
                     },
                 },
+                "won_by_manager": won_by_manager,
                 "status_breakdown": status_breakdown,
             }
 
@@ -1491,23 +1682,25 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         serializer = LeadChangeFirstManagerSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         manager = serializer.validated_data["manager"]
+        first_assigned_at = serializer.validated_data.get("first_assigned_at")
         reason = serializer.validated_data.get("reason", "")
 
-        lead = (
-            Lead.objects.select_related("partner", "manager", "first_manager", "source", "status")
-            .get(id=pk)
-        )
+        lead = self.get_object()
+        self._assert_can_change_first_manager_for_lead(lead)
         before = {
             "lead_id": str(lead.id),
             "first_manager": _manager_payload(getattr(lead, "first_manager", None)),
             "first_assigned_at": lead.first_assigned_at.isoformat() if lead.first_assigned_at else None,
         }
         lead.first_manager = manager
-        if lead.first_assigned_at is None:
+        update_fields = ["first_manager", "updated_at"]
+        if first_assigned_at is not None:
+            lead.first_assigned_at = first_assigned_at
+            update_fields.append("first_assigned_at")
+        elif lead.first_assigned_at is None:
             lead.first_assigned_at = timezone.now()
-            lead.save(update_fields=["first_manager", "first_assigned_at", "updated_at"])
-        else:
-            lead.save(update_fields=["first_manager", "updated_at"])
+            update_fields.append("first_assigned_at")
+        lead.save(update_fields=update_fields)
         after = {
             "lead_id": str(lead.id),
             "first_manager": _manager_payload(getattr(lead, "first_manager", None)),
@@ -1555,10 +1748,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 .get(id=pk)
             )
             self._assert_can_manage_assignment(lead, operation="assign")
-            if manager.role == UserRole.RET and not _is_manager_won_locked(lead):
-                raise serializers.ValidationError(
-                    {"manager": "Lead can be transferred to RET only after manager outcome is WON"}
-                )
             previous_manager = lead.manager
             update_fields = ["manager", "updated_at"]
             if getattr(previous_manager, "id", None) != manager.id:
@@ -1678,12 +1867,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 if lead is None:
                     continue
                 self._assert_can_manage_assignment(lead, operation="assign")
-                if manager.role == UserRole.RET and not _is_manager_won_locked(lead):
-                    error_text = "Lead can be transferred to RET only after manager outcome is WON"
-                    if not allow_partial:
-                        raise serializers.ValidationError({"lead_ids": {str(lead.id): error_text}})
-                    failed[str(lead.id)] = error_text
-                    continue
                 previous_manager = lead.manager
                 update_fields = ["manager", "updated_at"]
                 if getattr(previous_manager, "id", None) != manager.id:
@@ -1849,14 +2032,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 "status_id": str(from_status.id) if from_status else None,
                 "status_code": from_status.code if from_status else None,
                 "status_bucket": from_bucket,
-                "manager_outcome": lead.manager_outcome,
-                "manager_outcome_at": lead.manager_outcome_at.isoformat() if lead.manager_outcome_at else None,
-                "manager_outcome_by_id": str(lead.manager_outcome_by_id) if lead.manager_outcome_by_id else None,
             }
 
             lead.status = to_status
             update_fields = ["status", "updated_at"]
-            _apply_manager_outcome_if_needed(lead, to_status=to_status, actor_user=request.user, update_fields=update_fields)
             lead.save(update_fields=sorted(set(update_fields)))
 
             payload_after = {
@@ -1864,9 +2043,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 "status_id": str(lead.status_id) if lead.status_id else None,
                 "status_code": to_status.code,
                 "status_bucket": _status_conversion_bucket(to_status),
-                "manager_outcome": lead.manager_outcome,
-                "manager_outcome_at": lead.manager_outcome_at.isoformat() if lead.manager_outcome_at else None,
-                "manager_outcome_by_id": str(lead.manager_outcome_by_id) if lead.manager_outcome_by_id else None,
             }
 
             _log_status_audit(
@@ -1967,14 +2143,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     "status_id": str(from_status.id) if from_status else None,
                     "status_code": from_status.code if from_status else None,
                     "status_bucket": from_bucket,
-                    "manager_outcome": lead.manager_outcome,
-                    "manager_outcome_at": lead.manager_outcome_at.isoformat() if lead.manager_outcome_at else None,
-                    "manager_outcome_by_id": str(lead.manager_outcome_by_id) if lead.manager_outcome_by_id else None,
                 }
 
                 lead.status = to_status
                 update_fields = ["status", "updated_at"]
-                _apply_manager_outcome_if_needed(lead, to_status=to_status, actor_user=request.user, update_fields=update_fields)
                 lead.save(update_fields=sorted(set(update_fields)))
 
                 payload_after = {
@@ -1982,9 +2154,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     "status_id": str(lead.status_id) if lead.status_id else None,
                     "status_code": to_status.code,
                     "status_bucket": _status_conversion_bucket(to_status),
-                    "manager_outcome": lead.manager_outcome,
-                    "manager_outcome_at": lead.manager_outcome_at.isoformat() if lead.manager_outcome_at else None,
-                    "manager_outcome_by_id": str(lead.manager_outcome_by_id) if lead.manager_outcome_by_id else None,
                 }
 
                 _log_status_audit(
