@@ -11,6 +11,7 @@ from django.utils import timezone
 from apps.iam.models import UserRole
 from apps.leads.models import (
     Lead,
+    LeadAuditEntity,
     LeadComment,
     LeadDeposit,
     LeadDuplicateAttempt,
@@ -3827,6 +3828,245 @@ class LeadStatusCatalogApiTests(APITestCase):
             type_error = type_error[0]
         self.assertEqual(type_error, "FTD already exists for this lead")
         self.assertEqual(LeadDeposit.objects.filter(lead=lead, type=LeadDeposit.Type.FTD, is_deleted=False).count(), 1)
+
+    def test_deposits_endpoint_manager_lists_only_own_created_deposits(self):
+        manager = User.objects.create_user(username="manager_dep_list_own", password="pass12345", role=UserRole.MANAGER)
+        other = User.objects.create_user(username="manager_dep_list_other", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_dep_list_other", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Deposit List Own", code="partner-deposit-list-own")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991101", custom_fields={})
+        own_dep = LeadDeposit.objects.create(lead=lead, creator=manager, amount="100.00", type=LeadDeposit.Type.FTD)
+        LeadDeposit.objects.create(lead=lead, creator=other, amount="50.00", type=LeadDeposit.Type.DEPOSIT)
+        LeadDeposit.objects.create(lead=lead, creator=ret_user, amount="75.00", type=LeadDeposit.Type.DEPOSIT)
+        self._auth(manager)
+
+        response = self.client.get("/api/v1/leads/deposits/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], own_dep.id)
+
+    def test_deposits_endpoint_ret_lists_own_and_manager_deposits(self):
+        manager = User.objects.create_user(username="manager_dep_list_for_ret", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_dep_list_scope", password="pass12345", role=UserRole.RET)
+        admin_user = User.objects.create_user(username="admin_dep_list_hidden", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Deposit List RET", code="partner-deposit-list-ret")
+        lead = Lead.objects.create(partner=partner, manager=ret_user, phone="+19991102", custom_fields={})
+        manager_dep = LeadDeposit.objects.create(lead=lead, creator=manager, amount="100.00", type=LeadDeposit.Type.FTD)
+        own_dep = LeadDeposit.objects.create(lead=lead, creator=ret_user, amount="60.00", type=LeadDeposit.Type.RELOAD)
+        LeadDeposit.objects.create(lead=lead, creator=admin_user, amount="70.00", type=LeadDeposit.Type.DEPOSIT)
+        self._auth(ret_user)
+
+        response = self.client.get("/api/v1/leads/deposits/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(returned_ids, {manager_dep.id, own_dep.id})
+
+    def test_deposits_endpoint_teamleader_lists_manager_and_teamleader_deposits(self):
+        teamleader = User.objects.create_user(username="tl_dep_list_scope", password="pass12345", role=UserRole.TEAMLEADER)
+        other_teamleader = User.objects.create_user(username="tl_dep_list_scope_other", password="pass12345", role=UserRole.TEAMLEADER)
+        manager = User.objects.create_user(username="manager_dep_list_scope", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_dep_list_scope_2", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Deposit List TL", code="partner-deposit-list-tl")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991103", custom_fields={})
+        manager_dep = LeadDeposit.objects.create(lead=lead, creator=manager, amount="100.00", type=LeadDeposit.Type.FTD)
+        own_dep = LeadDeposit.objects.create(lead=lead, creator=teamleader, amount="44.00", type=LeadDeposit.Type.DEPOSIT)
+        other_tl_dep = LeadDeposit.objects.create(lead=lead, creator=other_teamleader, amount="66.00", type=LeadDeposit.Type.DEPOSIT)
+        LeadDeposit.objects.create(lead=lead, creator=ret_user, amount="55.00", type=LeadDeposit.Type.DEPOSIT)
+        self._auth(teamleader)
+
+        response = self.client.get("/api/v1/leads/deposits/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(returned_ids, {manager_dep.id, own_dep.id, other_tl_dep.id})
+
+    def test_deposits_endpoint_supports_search_by_lead_name_phone_and_email(self):
+        admin = User.objects.create_user(username="admin_dep_search", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_dep_search", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Deposit Search", code="partner-deposit-search")
+        lead_match = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            full_name="Nina Petrova",
+            phone="+19991201",
+            email="nina@example.com",
+            custom_fields={},
+        )
+        lead_other = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            full_name="John Smith",
+            phone="+19991202",
+            email="john@example.com",
+            custom_fields={},
+        )
+        dep_match = LeadDeposit.objects.create(lead=lead_match, creator=manager, amount="100.00", type=LeadDeposit.Type.FTD)
+        LeadDeposit.objects.create(lead=lead_other, creator=manager, amount="50.00", type=LeadDeposit.Type.DEPOSIT)
+        self._auth(admin)
+
+        by_name = self.client.get("/api/v1/leads/deposits/", {"search": "Nina"})
+        self.assertEqual(by_name.status_code, status.HTTP_200_OK)
+        self.assertEqual(by_name.data["count"], 1)
+        self.assertEqual(by_name.data["results"][0]["id"], dep_match.id)
+
+        by_phone = self.client.get("/api/v1/leads/deposits/", {"search": "+19991201"})
+        self.assertEqual(by_phone.status_code, status.HTTP_200_OK)
+        self.assertEqual(by_phone.data["count"], 1)
+        self.assertEqual(by_phone.data["results"][0]["id"], dep_match.id)
+
+        by_email = self.client.get("/api/v1/leads/deposits/", {"search": "nina@example.com"})
+        self.assertEqual(by_email.status_code, status.HTTP_200_OK)
+        self.assertEqual(by_email.data["count"], 1)
+        self.assertEqual(by_email.data["results"][0]["id"], dep_match.id)
+
+    def test_deposit_serializer_includes_lead_full_name(self):
+        admin = User.objects.create_user(username="admin_dep_lead_name", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_dep_lead_name", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Deposit Lead Name", code="partner-deposit-lead-name")
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            full_name="Alice Walker",
+            phone="+19991211",
+            custom_fields={},
+        )
+        dep = LeadDeposit.objects.create(lead=lead, creator=manager, amount="120.00", type=LeadDeposit.Type.FTD)
+        self._auth(admin)
+
+        response = self.client.get(f"/api/v1/leads/deposits/{dep.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["lead"], lead.id)
+        self.assertEqual(response.data["lead_full_name"], "Alice Walker")
+
+    def test_deposits_default_ordering_is_newest_first(self):
+        admin = User.objects.create_user(username="admin_dep_ordering", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_dep_ordering", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Deposit Ordering", code="partner-deposit-ordering")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991212", custom_fields={})
+        dep_old = LeadDeposit.objects.create(lead=lead, creator=manager, amount="90.00", type=LeadDeposit.Type.FTD)
+        dep_new = LeadDeposit.objects.create(lead=lead, creator=manager, amount="120.00", type=LeadDeposit.Type.DEPOSIT)
+        self._set_deposit_created_at(dep_old, timezone.make_aware(datetime(2026, 2, 1, 10, 0, 0)))
+        self._set_deposit_created_at(dep_new, timezone.make_aware(datetime(2026, 2, 2, 10, 0, 0)))
+        self._auth(admin)
+
+        list_response = self.client.get("/api/v1/leads/deposits/")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["results"][0]["id"], dep_new.id)
+        self.assertEqual(list_response.data["results"][1]["id"], dep_old.id)
+
+        nested_response = self.client.get(f"/api/v1/leads/records/{lead.id}/deposits/")
+        self.assertEqual(nested_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(nested_response.data[0]["id"], dep_new.id)
+        self.assertEqual(nested_response.data[1]["id"], dep_old.id)
+
+    def test_deposits_endpoint_admin_can_create_update_soft_delete_restore_and_audit(self):
+        admin = User.objects.create_user(username="admin_dep_crud", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_dep_crud", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Deposit CRUD", code="partner-deposit-crud")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991104", custom_fields={})
+        self._auth(admin)
+
+        create_resp = self.client.post(
+            "/api/v1/leads/deposits/",
+            {
+                "lead": lead.id,
+                "amount": "101.00",
+                "type": LeadDeposit.Type.FTD,
+                "reason": "manual create",
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        dep_id = create_resp.data["id"]
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead=lead,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep_id),
+                event_type=LeadAuditEvent.DEPOSIT_CREATED,
+            ).exists()
+        )
+
+        update_resp = self.client.patch(
+            f"/api/v1/leads/deposits/{dep_id}/",
+            {
+                "amount": "111.00",
+                "reason": "adjust amount",
+            },
+            format="json",
+        )
+        self.assertEqual(update_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_resp.data["amount"], "111.00")
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead=lead,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep_id),
+                event_type=LeadAuditEvent.DEPOSIT_UPDATED,
+            ).exists()
+        )
+
+        soft_delete_resp = self.client.post(
+            f"/api/v1/leads/deposits/{dep_id}/soft_delete/",
+            {},
+            format="json",
+        )
+        self.assertEqual(soft_delete_resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(LeadDeposit.objects.filter(id=dep_id).exists())
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead=lead,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep_id),
+                event_type=LeadAuditEvent.DEPOSIT_SOFT_DELETED,
+            ).exists()
+        )
+
+        restore_resp = self.client.post(
+            f"/api/v1/leads/deposits/{dep_id}/restore/",
+            {},
+            format="json",
+        )
+        self.assertEqual(restore_resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(LeadDeposit.objects.filter(id=dep_id).exists())
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead=lead,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep_id),
+                event_type=LeadAuditEvent.DEPOSIT_RESTORED,
+            ).exists()
+        )
+
+    def test_deposits_endpoint_superuser_can_hard_delete_and_audit(self):
+        superuser = User.objects.create_user(
+            username="su_dep_delete",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        manager = User.objects.create_user(username="manager_dep_delete", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Deposit Delete", code="partner-deposit-delete")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991105", custom_fields={})
+        dep = LeadDeposit.objects.create(lead=lead, creator=manager, amount="88.00", type=LeadDeposit.Type.FTD)
+        self._auth(superuser)
+
+        response = self.client.delete(f"/api/v1/leads/deposits/{dep.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(LeadDeposit.all_objects.filter(id=dep.id).exists())
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead=lead,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep.id),
+                event_type=LeadAuditEvent.DEPOSIT_HARD_DELETED,
+            ).exists()
+        )
 
     def test_manager_cannot_set_manual_deposit_type(self):
         manager_owner = User.objects.create_user(username="manager_manual_dep_denied", password="pass12345", role=UserRole.MANAGER)

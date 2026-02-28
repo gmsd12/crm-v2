@@ -415,25 +415,46 @@ class LeadRollbackRetTransferSerializer(serializers.Serializer):
 
 
 class LeadDepositSerializer(serializers.ModelSerializer):
+    lead_full_name = serializers.CharField(source="lead.full_name", read_only=True)
     creator_username = serializers.CharField(source="creator.username", read_only=True)
+    creator_first_name = serializers.CharField(source="creator.first_name", read_only=True)
+    creator_last_name = serializers.CharField(source="creator.last_name", read_only=True)
+    creator_role = serializers.CharField(source="creator.role", read_only=True)
 
     class Meta:
         model = LeadDeposit
         fields = [
             "id",
             "lead",
+            "lead_full_name",
             "creator",
             "creator_username",
+            "creator_first_name",
+            "creator_last_name",
+            "creator_role",
             "amount",
             "type",
+            "is_deleted",
+            "deleted_at",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "lead", "creator", "creator_username", "created_at", "updated_at"]
+        read_only_fields = fields
 
 
 class LeadDepositCreateSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    type = serializers.ChoiceField(choices=LeadDeposit.Type.choices, required=False)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
+
+
+class LeadDepositWriteSerializer(serializers.Serializer):
+    lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all(), required=False)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=False)
     type = serializers.ChoiceField(choices=LeadDeposit.Type.choices, required=False)
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 

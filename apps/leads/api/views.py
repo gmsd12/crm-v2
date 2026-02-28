@@ -44,6 +44,7 @@ from .serializers import (
     LeadCloseWonTransferSerializer,
     LeadDepositCreateSerializer,
     LeadDepositSerializer,
+    LeadDepositWriteSerializer,
     LeadRollbackRetTransferSerializer,
     BulkLeadUnassignManagerSerializer,
     BulkLeadStatusChangeSerializer,
@@ -154,6 +155,90 @@ def _deposit_unique_conflict_error(dep_type: int):
     if dep_type == LeadDeposit.Type.RELOAD:
         return serializers.ValidationError({"type": "Reload already exists for this lead"})
     return serializers.ValidationError({"type": "Deposit type conflict for this lead"})
+
+
+def _lead_manager_role(lead: Lead) -> str | None:
+    manager = getattr(lead, "manager", None)
+    return getattr(manager, "role", None)
+
+
+def _assert_deposit_create_allowed(*, actor_user, lead: Lead, manual_type: bool) -> None:
+    role = getattr(actor_user, "role", None)
+    lead_manager_role = _lead_manager_role(lead)
+
+    if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+        return
+    if role == UserRole.TEAMLEADER:
+        if manual_type:
+            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+        if lead_manager_role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
+            raise PermissionDenied("Teamleaders can create deposits only for manager/teamleader leads")
+        return
+    if role == UserRole.MANAGER:
+        if manual_type:
+            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+        if lead.manager_id != actor_user.id:
+            raise PermissionDenied("Managers can create deposits only for own leads")
+        return
+    if role == UserRole.RET:
+        if manual_type:
+            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+        if lead.manager_id != actor_user.id:
+            raise PermissionDenied("RET can create deposits only for own leads")
+        return
+    raise PermissionDenied("You cannot create deposits for this lead")
+
+
+def _create_lead_deposit(
+    *,
+    actor_user,
+    lead: Lead,
+    amount,
+    requested_type=None,
+    reason: str = "",
+) -> LeadDeposit:
+    manual_type = requested_type is not None
+    _assert_deposit_create_allowed(actor_user=actor_user, lead=lead, manual_type=manual_type)
+
+    role = getattr(actor_user, "role", None)
+    if requested_type is not None:
+        dep_type = int(requested_type)
+    else:
+        dep_type = _next_deposit_type(lead, actor_role=role)
+
+    if role == UserRole.TEAMLEADER and dep_type != LeadDeposit.Type.FTD:
+        raise serializers.ValidationError({"type": "Teamleaders can create only FTD"})
+    if role == UserRole.MANAGER and dep_type != LeadDeposit.Type.FTD:
+        raise serializers.ValidationError({"type": "Managers can create only FTD"})
+    if role == UserRole.RET and dep_type == LeadDeposit.Type.FTD:
+        raise serializers.ValidationError({"type": "RET cannot create FTD"})
+
+    if dep_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
+        if LeadDeposit.objects.filter(lead=lead, type=dep_type, is_deleted=False).exists():
+            raise _deposit_unique_conflict_error(dep_type)
+
+    try:
+        dep = LeadDeposit.objects.create(
+            lead=lead,
+            creator=actor_user,
+            amount=amount,
+            type=dep_type,
+        )
+    except IntegrityError:
+        raise _deposit_unique_conflict_error(dep_type)
+
+    _touch_lead_last_contacted(lead, at=dep.created_at)
+    _log_status_audit(
+        event_type=LeadAuditEvent.DEPOSIT_CREATED,
+        actor_user=actor_user,
+        source=LeadAuditSource.API,
+        entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+        entity_id=str(dep.id),
+        lead=lead,
+        reason=reason,
+        payload_after=_deposit_payload(dep),
+    )
+    return dep
 
 
 def _status_conversion_bucket(status_obj: LeadStatus | None) -> str:
@@ -761,6 +846,215 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         return Response(status=status.HTTP_200_OK)
 
 
+class LeadDepositFilter(django_filters.FilterSet):
+    id__in = IdInFilter(field_name="id", lookup_expr="in")
+    lead__in = IdInFilter(field_name="lead_id", lookup_expr="in")
+    creator__in = NumberInFilter(field_name="creator_id", lookup_expr="in")
+    creator_role = django_filters.ChoiceFilter(field_name="creator__role", choices=UserRole.choices)
+    type__in = NumberInFilter(field_name="type", lookup_expr="in")
+    created_from = django_filters.IsoDateTimeFilter(field_name="created_at", lookup_expr="gte")
+    created_to = django_filters.IsoDateTimeFilter(field_name="created_at", lookup_expr="lte")
+
+    class Meta:
+        model = LeadDeposit
+        fields = [
+            "id",
+            "id__in",
+            "lead",
+            "lead__in",
+            "creator",
+            "creator__in",
+            "creator_role",
+            "type",
+            "type__in",
+            "created_at",
+            "created_from",
+            "created_to",
+        ]
+
+
+class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    queryset = LeadDeposit.objects.select_related("lead", "creator", "lead__manager").all().order_by("-created_at", "-id")
+    permission_classes = [IsAuthenticated, RBACPermission]
+    filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filterset_class = LeadDepositFilter
+    search_fields = [
+        "lead__full_name",
+        "lead__phone",
+        "lead__email",
+    ]
+    ordering = ["-created_at", "-id"]
+    ordering_fields = [
+        "id",
+        "lead__id",
+        "creator__username",
+        "creator__role",
+        "type",
+        "amount",
+        "created_at",
+        "updated_at",
+    ]
+    action_perms = {
+        "list": (Perm.LEADS_READ,),
+        "retrieve": (Perm.LEADS_READ,),
+        "create": (Perm.LEADS_WRITE,),
+        "update": (Perm.LEADS_WRITE,),
+        "partial_update": (Perm.LEADS_WRITE,),
+        "soft_delete": (Perm.LEADS_WRITE,),
+        "restore": (Perm.LEADS_WRITE,),
+        "destroy": (Perm.LEADS_HARD_DELETE,),
+    }
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(self.request.user, "role", None)
+        if role == UserRole.MANAGER:
+            return queryset.filter(creator_id=self.request.user.id)
+        if role == UserRole.RET:
+            return queryset.filter(Q(creator_id=self.request.user.id) | Q(creator__role=UserRole.MANAGER))
+        if role == UserRole.TEAMLEADER:
+            if self.action in {"list", "retrieve"}:
+                return queryset.filter(creator__role__in=[UserRole.MANAGER, UserRole.TEAMLEADER])
+            return queryset.filter(creator__role=UserRole.MANAGER)
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action in {"create", "update", "partial_update"}:
+            return LeadDepositWriteSerializer
+        return LeadDepositSerializer
+
+    def _assert_update_allowed(self, deposit: LeadDeposit):
+        role = getattr(self.request.user, "role", None)
+        if "lead" in self.request.data:
+            raise PermissionDenied("Lead cannot be changed for an existing deposit")
+        if role in {UserRole.MANAGER, UserRole.RET, UserRole.TEAMLEADER} and "type" in self.request.data:
+            raise PermissionDenied("Only admins and superusers can change deposit type")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lead = serializer.validated_data.get("lead")
+        if lead is None:
+            raise serializers.ValidationError({"lead": "This field is required"})
+        dep = _create_lead_deposit(
+            actor_user=request.user,
+            lead=lead,
+            amount=serializer.validated_data["amount"],
+            requested_type=serializer.validated_data.get("type"),
+            reason=serializer.validated_data.get("reason", ""),
+        )
+        return Response(LeadDepositSerializer(dep).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        deposit = self.get_object()
+        self._assert_update_allowed(deposit)
+
+        serializer = self.get_serializer(deposit, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        before = _deposit_payload(deposit)
+
+        update_fields: list[str] = ["updated_at"]
+        if "amount" in validated:
+            deposit.amount = validated["amount"]
+            update_fields.append("amount")
+        if "type" in validated:
+            new_type = int(validated["type"])
+            if new_type != deposit.type and new_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
+                if LeadDeposit.objects.filter(lead=deposit.lead, type=new_type, is_deleted=False).exclude(id=deposit.id).exists():
+                    raise _deposit_unique_conflict_error(new_type)
+            deposit.type = new_type
+            update_fields.append("type")
+
+        if len(update_fields) == 1:
+            raise serializers.ValidationError("No changes provided")
+
+        try:
+            deposit.save(update_fields=sorted(set(update_fields)))
+        except IntegrityError:
+            raise _deposit_unique_conflict_error(deposit.type)
+
+        _log_status_audit(
+            event_type=LeadAuditEvent.DEPOSIT_UPDATED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+            entity_id=str(deposit.id),
+            lead=deposit.lead,
+            reason=validated.get("reason", ""),
+            payload_before=before,
+            payload_after=_deposit_payload(deposit),
+        )
+        return Response(LeadDepositSerializer(deposit).data, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+    @action(detail=True, methods=["post"])
+    def soft_delete(self, request, pk=None):
+        deposit = self.get_object()
+        before = _deposit_payload(deposit)
+        deposit.delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.DEPOSIT_SOFT_DELETED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+            entity_id=str(deposit.id),
+            lead=deposit.lead,
+            payload_before=before,
+            payload_after=_deposit_payload(deposit),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        role = getattr(request.user, "role", None)
+        deposit = get_object_or_404(LeadDeposit.all_objects.select_related("lead", "creator", "lead__manager"), id=pk)
+        allowed = False
+        if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+            allowed = True
+        elif role == UserRole.MANAGER:
+            allowed = deposit.creator_id == request.user.id
+        elif role == UserRole.RET:
+            allowed = deposit.creator_id == request.user.id or getattr(deposit.creator, "role", None) == UserRole.MANAGER
+        elif role == UserRole.TEAMLEADER:
+            allowed = getattr(deposit.creator, "role", None) == UserRole.MANAGER
+        if not allowed:
+            raise PermissionDenied("You do not have permission to restore this deposit")
+
+        before = _deposit_payload(deposit)
+        deposit.restore()
+        _log_status_audit(
+            event_type=LeadAuditEvent.DEPOSIT_RESTORED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+            entity_id=str(deposit.id),
+            lead=deposit.lead,
+            payload_before=before,
+            payload_after=_deposit_payload(deposit),
+        )
+        return Response(LeadDepositSerializer(deposit).data, status=status.HTTP_200_OK)
+
+    def perform_destroy(self, instance):
+        lead = instance.lead
+        deposit_id = str(instance.id)
+        before = _deposit_payload(instance)
+        instance.hard_delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.DEPOSIT_HARD_DELETED,
+            actor_user=self.request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+            entity_id=deposit_id,
+            lead=lead,
+            payload_before=before,
+        )
+
+
 class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     queryset = Lead.objects.select_related(
         "partner",
@@ -962,7 +1256,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             after_name = after_manager.get("username") or "Unassigned"
             return f"{before_name} -> {after_name}"
 
-        if audit.event_type in {LeadAuditEvent.DEPOSIT_CREATED, LeadAuditEvent.DEPOSIT_REVERSED}:
+        if audit.event_type in {
+            LeadAuditEvent.DEPOSIT_CREATED,
+            LeadAuditEvent.DEPOSIT_UPDATED,
+            LeadAuditEvent.DEPOSIT_REVERSED,
+            LeadAuditEvent.DEPOSIT_SOFT_DELETED,
+            LeadAuditEvent.DEPOSIT_RESTORED,
+            LeadAuditEvent.DEPOSIT_HARD_DELETED,
+        }:
             dep_payload = payload_after or payload_before
             dep_type = dep_payload.get("type")
             dep_amount = dep_payload.get("amount")
@@ -1214,28 +1515,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             return
         raise PermissionDenied("Only teamleaders, admins and superusers can rollback RET transfer")
 
-    def _assert_can_create_deposit(self, *, lead: Lead, manual_type: bool):
-        role = getattr(self.request.user, "role", None)
-        if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
-            return
-        if role == UserRole.TEAMLEADER:
-            if manual_type:
-                raise PermissionDenied("Only admins and superusers can choose deposit type manually")
-            return
-        if role == UserRole.MANAGER:
-            if manual_type:
-                raise PermissionDenied("Only admins and superusers can choose deposit type manually")
-            if lead.manager_id != self.request.user.id:
-                raise PermissionDenied("Managers can create deposits only for own leads")
-            return
-        if role == UserRole.RET:
-            if manual_type:
-                raise PermissionDenied("Only admins and superusers can choose deposit type manually")
-            if lead.manager_id != self.request.user.id:
-                raise PermissionDenied("RET can create deposits only for own leads")
-            return
-        raise PermissionDenied("You cannot create deposits for this lead")
-
     def create(self, request, *args, **kwargs):
         self._assert_can_create()
         self._assert_create_payload_allowed()
@@ -1339,51 +1618,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def deposits(self, request, pk=None):
         lead = self.get_object()
         if request.method.upper() == "GET":
-            items = LeadDeposit.objects.filter(lead=lead).select_related("creator").order_by("-created_at")
+            items = LeadDeposit.objects.filter(lead=lead).select_related("creator").order_by("-created_at", "-id")
             return Response(LeadDepositSerializer(items, many=True).data, status=status.HTTP_200_OK)
 
         serializer = LeadDepositCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        manual_type = "type" in serializer.validated_data
-        self._assert_can_create_deposit(lead=lead, manual_type=manual_type)
-        role = getattr(request.user, "role", None)
-
-        requested_type = serializer.validated_data.get("type")
-        if requested_type is not None:
-            dep_type = int(requested_type)
-        else:
-            dep_type = _next_deposit_type(lead, actor_role=role)
-
-        if role == UserRole.TEAMLEADER and dep_type != LeadDeposit.Type.FTD:
-            raise serializers.ValidationError({"type": "Teamleaders can create only FTD"})
-        if role == UserRole.MANAGER and dep_type != LeadDeposit.Type.FTD:
-            raise serializers.ValidationError({"type": "Managers can create only FTD"})
-        if role == UserRole.RET and dep_type == LeadDeposit.Type.FTD:
-            raise serializers.ValidationError({"type": "RET cannot create FTD"})
-
-        if dep_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
-            if LeadDeposit.objects.filter(lead=lead, type=dep_type, is_deleted=False).exists():
-                raise _deposit_unique_conflict_error(dep_type)
-
-        try:
-            dep = LeadDeposit.objects.create(
-                lead=lead,
-                creator=request.user,
-                amount=serializer.validated_data["amount"],
-                type=dep_type,
-            )
-        except IntegrityError:
-            raise _deposit_unique_conflict_error(dep_type)
-        _touch_lead_last_contacted(lead, at=dep.created_at)
-        _log_status_audit(
-            event_type=LeadAuditEvent.DEPOSIT_CREATED,
+        dep = _create_lead_deposit(
             actor_user=request.user,
-            source=LeadAuditSource.API,
-            entity_type=LeadAuditEntity.LEAD,
-            entity_id=str(lead.id),
             lead=lead,
+            amount=serializer.validated_data["amount"],
+            requested_type=serializer.validated_data.get("type"),
             reason=serializer.validated_data.get("reason", ""),
-            payload_after=_deposit_payload(dep),
         )
         return Response(LeadDepositSerializer(dep).data, status=status.HTTP_201_CREATED)
 

@@ -128,7 +128,7 @@ class LeadDepositAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("id", "lead", "type", "amount", "creator", "created_at", "is_deleted")
     list_filter = ("type", "creator", "is_deleted")
     search_fields = ("lead__id", "lead__phone", "creator__username")
-    ordering = ("-created_at",)
+    ordering = ("-created_at", "-id")
     readonly_fields = ("created_at", "updated_at", "deleted_at")
     actions = ("soft_delete_selected", "restore_selected")
 

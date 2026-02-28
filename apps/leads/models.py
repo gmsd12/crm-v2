@@ -139,6 +139,7 @@ class LeadDeposit(BaseModel):
 
     class Meta:
         db_table = "lead_deposits"
+        ordering = ("-created_at", "-id")
         indexes = [
             models.Index(fields=["lead", "created_at"]),
             models.Index(fields=["creator", "created_at"]),
@@ -227,7 +228,11 @@ class LeadAuditEvent(models.TextChoices):
     COMMENT_UNPINNED = "comment_unpinned", "Comment Unpinned"
     DUPLICATE_REJECTED = "duplicate_rejected", "Duplicate Rejected"
     DEPOSIT_CREATED = "deposit_created", "Deposit Created"
+    DEPOSIT_UPDATED = "deposit_updated", "Deposit Updated"
     DEPOSIT_REVERSED = "deposit_reversed", "Deposit Reversed"
+    DEPOSIT_SOFT_DELETED = "deposit_soft_deleted", "Deposit Soft Deleted"
+    DEPOSIT_RESTORED = "deposit_restored", "Deposit Restored"
+    DEPOSIT_HARD_DELETED = "deposit_hard_deleted", "Deposit Hard Deleted"
     RET_TRANSFERRED = "ret_transferred", "Transferred To RET"
     RET_TRANSFER_ROLLBACK = "ret_transfer_rollback", "RET Transfer Rollback"
 
@@ -236,6 +241,7 @@ class LeadAuditEntity(models.TextChoices):
     LEAD = "lead", "Lead"
     LEAD_STATUS = "lead_status", "Lead Status"
     LEAD_COMMENT = "lead_comment", "Lead Comment"
+    LEAD_DEPOSIT = "lead_deposit", "Lead Deposit"
     DUPLICATE_ATTEMPT = "duplicate_attempt", "Duplicate Attempt"
 
 
