@@ -4014,6 +4014,98 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(nested_response.data[0]["id"], dep_new.id)
         self.assertEqual(nested_response.data[1]["id"], dep_old.id)
 
+    def test_deposit_stats_monthly_aggregates_ftd_and_non_ftd_amounts(self):
+        admin = User.objects.create_user(username="admin_dep_stats_monthly", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_dep_stats_monthly", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_dep_stats_monthly", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Deposit Stats Monthly", code="partner-deposit-stats-monthly")
+        lead_jan = Lead.objects.create(partner=partner, manager=manager, phone="+19991213", custom_fields={})
+        lead_feb = Lead.objects.create(partner=partner, manager=ret_user, phone="+19991216", custom_fields={})
+
+        jan_ftd = LeadDeposit.objects.create(lead=lead_jan, creator=manager, amount="100.00", type=LeadDeposit.Type.FTD)
+        jan_reload = LeadDeposit.objects.create(lead=lead_jan, creator=ret_user, amount="40.00", type=LeadDeposit.Type.RELOAD)
+        feb_ftd = LeadDeposit.objects.create(lead=lead_feb, creator=ret_user, amount="200.00", type=LeadDeposit.Type.FTD)
+        feb_deposit = LeadDeposit.objects.create(lead=lead_feb, creator=ret_user, amount="25.00", type=LeadDeposit.Type.DEPOSIT)
+        soft_deleted = LeadDeposit.objects.create(lead=lead_feb, creator=ret_user, amount="999.00", type=LeadDeposit.Type.DEPOSIT)
+        soft_deleted.delete()
+
+        self._set_deposit_created_at(jan_ftd, timezone.make_aware(datetime(2026, 1, 5, 10, 0, 0)))
+        self._set_deposit_created_at(jan_reload, timezone.make_aware(datetime(2026, 1, 8, 10, 0, 0)))
+        self._set_deposit_created_at(feb_ftd, timezone.make_aware(datetime(2026, 2, 3, 10, 0, 0)))
+        self._set_deposit_created_at(feb_deposit, timezone.make_aware(datetime(2026, 2, 10, 10, 0, 0)))
+        LeadDeposit.all_objects.filter(id=soft_deleted.id).update(
+            created_at=timezone.make_aware(datetime(2026, 2, 12, 10, 0, 0))
+        )
+
+        self._auth(admin)
+        response = self.client.get(
+            "/api/v1/leads/deposits/stats/monthly/?date_from=2026-01-01&date_to=2026-02-28"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["ftd_count"], 2)
+        self.assertEqual(response.data["summary"]["non_ftd_total_amount"], "65.00")
+        self.assertEqual(
+            response.data["items"],
+            [
+                {
+                    "year": 2026,
+                    "month": 1,
+                    "month_key": "2026-01",
+                    "month_label": "2026-01",
+                    "ftd_count": 1,
+                    "non_ftd_total_amount": "40.00",
+                },
+                {
+                    "year": 2026,
+                    "month": 2,
+                    "month_key": "2026-02",
+                    "month_label": "2026-02",
+                    "ftd_count": 1,
+                    "non_ftd_total_amount": "25.00",
+                },
+            ],
+        )
+
+    def test_deposit_stats_ftd_matrix_respects_creator_scope_for_manager(self):
+        manager = User.objects.create_user(username="manager_dep_stats_matrix", password="pass12345", role=UserRole.MANAGER)
+        other_manager = User.objects.create_user(
+            username="manager_dep_stats_matrix_other",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        partner = Partner.objects.create(name="Partner Deposit Stats Matrix", code="partner-deposit-stats-matrix")
+        own_lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991214", custom_fields={})
+        other_lead = Lead.objects.create(partner=partner, manager=other_manager, phone="+19991215", custom_fields={})
+        own_ftd = LeadDeposit.objects.create(lead=own_lead, creator=manager, amount="80.00", type=LeadDeposit.Type.FTD)
+        other_ftd = LeadDeposit.objects.create(
+            lead=other_lead,
+            creator=other_manager,
+            amount="90.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        self._set_deposit_created_at(own_ftd, timezone.make_aware(datetime(2026, 1, 15, 10, 0, 0)))
+        self._set_deposit_created_at(other_ftd, timezone.make_aware(datetime(2026, 2, 15, 10, 0, 0)))
+
+        self._auth(manager)
+        response = self.client.get(
+            "/api/v1/leads/deposits/stats/ftd-matrix/?date_from=2026-01-01&date_to=2026-02-28"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["columns"],
+            [
+                {"year": 2026, "month": 1, "month_key": "2026-01", "month_label": "2026-01"},
+                {"year": 2026, "month": 2, "month_key": "2026-02", "month_label": "2026-02"},
+            ],
+        )
+        self.assertEqual(len(response.data["rows"]), 1)
+        row = response.data["rows"][0]
+        self.assertEqual(row["user"]["id"], str(manager.id))
+        self.assertEqual(row["total_ftd"], 1)
+        self.assertEqual(row["cells"], {"2026-01": 1, "2026-02": 0})
+
     def test_deposits_endpoint_admin_can_create_update_soft_delete_restore_and_audit(self):
         admin = User.objects.create_user(username="admin_dep_crud", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_dep_crud", password="pass12345", role=UserRole.MANAGER)

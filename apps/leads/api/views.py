@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import Count, F, OuterRef, Q, Subquery
-from django.db.models.functions import TruncDate
+from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
+from django.db.models.functions import TruncDate, TruncMonth
 from django.shortcuts import get_object_or_404
 from django_filters import rest_framework as django_filters
 from django_filters.rest_framework import DjangoFilterBackend
@@ -50,6 +50,7 @@ from .serializers import (
     BulkLeadStatusChangeSerializer,
     LeadAssignManagerSerializer,
     LeadChangeFirstManagerSerializer,
+    LeadDepositStatsQuerySerializer,
     LeadFunnelMetricsQuerySerializer,
     LeadWriteSerializer,
     LeadCommentSerializer,
@@ -900,6 +901,8 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     action_perms = {
         "list": (Perm.LEADS_READ,),
         "retrieve": (Perm.LEADS_READ,),
+        "stats_monthly": (Perm.LEADS_READ,),
+        "stats_ftd_matrix": (Perm.LEADS_READ,),
         "create": (Perm.LEADS_WRITE,),
         "update": (Perm.LEADS_WRITE,),
         "partial_update": (Perm.LEADS_WRITE,),
@@ -925,6 +928,200 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if self.action in {"create", "update", "partial_update"}:
             return LeadDepositWriteSerializer
         return LeadDepositSerializer
+
+    def _get_stats_queryset(self, query_params) -> tuple:
+        query = LeadDepositStatsQuerySerializer(data=query_params)
+        query.is_valid(raise_exception=True)
+        validated = query.validated_data
+
+        queryset = self.filter_queryset(self.get_queryset()).order_by()
+        partner = validated.get("partner")
+        creator = validated.get("creator")
+        creator_role = validated.get("creator_role")
+        if partner is not None:
+            queryset = queryset.filter(lead__partner=partner)
+        if creator is not None:
+            queryset = queryset.filter(creator=creator)
+        if creator_role:
+            queryset = queryset.filter(creator__role=creator_role)
+
+        date_from = validated.get("date_from")
+        date_to = validated.get("date_to")
+        if date_from is not None:
+            start_at = timezone.make_aware(datetime.combine(date_from, time.min), timezone.get_current_timezone())
+            queryset = queryset.filter(created_at__gte=start_at)
+        if date_to is not None:
+            end_exclusive = timezone.make_aware(
+                datetime.combine(date_to + timedelta(days=1), time.min),
+                timezone.get_current_timezone(),
+            )
+            queryset = queryset.filter(created_at__lt=end_exclusive)
+
+        return queryset, validated
+
+    @staticmethod
+    def _month_range(date_from: date | None, date_to: date | None, month_values: list[datetime]) -> list[date]:
+        if date_from and date_to:
+            current = date_from.replace(day=1)
+            final = date_to.replace(day=1)
+            months: list[date] = []
+            while current <= final:
+                months.append(current)
+                if current.month == 12:
+                    current = current.replace(year=current.year + 1, month=1)
+                else:
+                    current = current.replace(month=current.month + 1)
+            return months
+
+        normalized = []
+        seen: set[date] = set()
+        for value in month_values:
+            month_key = value.date().replace(day=1)
+            if month_key in seen:
+                continue
+            seen.add(month_key)
+            normalized.append(month_key)
+        normalized.sort()
+        return normalized
+
+    @staticmethod
+    def _month_payload(month_start: date) -> dict:
+        month_key = month_start.strftime("%Y-%m")
+        return {
+            "year": month_start.year,
+            "month": month_start.month,
+            "month_key": month_key,
+            "month_label": month_key,
+        }
+
+    @staticmethod
+    def _amount_string(value) -> str:
+        return f"{(value or 0):.2f}"
+
+    @action(detail=False, methods=["get"], url_path="stats/monthly")
+    def stats_monthly(self, request):
+        queryset, params = self._get_stats_queryset(request.query_params)
+        rows = list(
+            queryset.annotate(month=TruncMonth("created_at"))
+            .values("month")
+            .annotate(
+                ftd_count=Count("id", filter=Q(type=LeadDeposit.Type.FTD)),
+                non_ftd_total_amount=Sum(
+                    "amount",
+                    filter=Q(type__in=[LeadDeposit.Type.RELOAD, LeadDeposit.Type.DEPOSIT]),
+                ),
+            )
+            .order_by("month")
+        )
+
+        month_map = {
+            row["month"].date().replace(day=1): {
+                "ftd_count": row["ftd_count"],
+                "non_ftd_total_amount": row["non_ftd_total_amount"],
+            }
+            for row in rows
+            if row["month"] is not None
+        }
+        month_keys = self._month_range(
+            params.get("date_from"),
+            params.get("date_to"),
+            [row["month"] for row in rows if row["month"] is not None],
+        )
+
+        items = []
+        total_ftd_count = 0
+        total_non_ftd_amount = 0
+        for month_start in month_keys:
+            data = month_map.get(month_start, {})
+            ftd_count = int(data.get("ftd_count") or 0)
+            non_ftd_total_amount = data.get("non_ftd_total_amount") or 0
+            total_ftd_count += ftd_count
+            total_non_ftd_amount += non_ftd_total_amount
+            items.append(
+                {
+                    **self._month_payload(month_start),
+                    "ftd_count": ftd_count,
+                    "non_ftd_total_amount": self._amount_string(non_ftd_total_amount),
+                }
+            )
+
+        return Response(
+            {
+                "period": {
+                    "date_from": params.get("date_from").isoformat() if params.get("date_from") else None,
+                    "date_to": params.get("date_to").isoformat() if params.get("date_to") else None,
+                },
+                "summary": {
+                    "ftd_count": total_ftd_count,
+                    "non_ftd_total_amount": self._amount_string(total_non_ftd_amount),
+                },
+                "items": items,
+            }
+        )
+
+    @action(detail=False, methods=["get"], url_path="stats/ftd-matrix")
+    def stats_ftd_matrix(self, request):
+        queryset, params = self._get_stats_queryset(request.query_params)
+        rows = list(
+            queryset.filter(type=LeadDeposit.Type.FTD)
+            .annotate(month=TruncMonth("created_at"))
+            .values(
+                "creator_id",
+                "creator__username",
+                "creator__first_name",
+                "creator__last_name",
+                "creator__role",
+                "month",
+            )
+            .annotate(ftd_count=Count("id"))
+            .order_by("creator__username", "creator_id", "month")
+        )
+
+        month_keys = self._month_range(
+            params.get("date_from"),
+            params.get("date_to"),
+            [row["month"] for row in rows if row["month"] is not None],
+        )
+        columns = [self._month_payload(month_start) for month_start in month_keys]
+        default_cells = {column["month_key"]: 0 for column in columns}
+
+        row_map: dict[int, dict] = {}
+        for row in rows:
+            creator_id = row["creator_id"]
+            if creator_id is None or row["month"] is None:
+                continue
+            if creator_id not in row_map:
+                row_map[creator_id] = {
+                    "user": {
+                        "id": str(creator_id),
+                        "username": row["creator__username"],
+                        "first_name": (row["creator__first_name"] or "").strip(),
+                        "last_name": (row["creator__last_name"] or "").strip(),
+                        "role": row["creator__role"],
+                    },
+                    "total_ftd": 0,
+                    "cells": dict(default_cells),
+                }
+            month_key = row["month"].date().replace(day=1).strftime("%Y-%m")
+            ftd_count = int(row["ftd_count"] or 0)
+            row_map[creator_id]["cells"][month_key] = ftd_count
+            row_map[creator_id]["total_ftd"] += ftd_count
+
+        matrix_rows = sorted(
+            row_map.values(),
+            key=lambda item: (-item["total_ftd"], item["user"]["username"] or "", item["user"]["id"]),
+        )
+
+        return Response(
+            {
+                "period": {
+                    "date_from": params.get("date_from").isoformat() if params.get("date_from") else None,
+                    "date_to": params.get("date_to").isoformat() if params.get("date_to") else None,
+                },
+                "columns": columns,
+                "rows": matrix_rows,
+            }
+        )
 
     def _assert_update_allowed(self, deposit: LeadDeposit):
         role = getattr(self.request.user, "role", None)

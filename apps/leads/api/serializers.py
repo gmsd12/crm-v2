@@ -354,6 +354,21 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         return attrs
 
 
+class LeadDepositStatsQuerySerializer(serializers.Serializer):
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
+    partner = serializers.PrimaryKeyRelatedField(queryset=Partner.objects.all(), required=False)
+    creator = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True), required=False)
+    creator_role = serializers.ChoiceField(choices=UserRole.choices, required=False)
+
+    def validate(self, attrs):
+        date_from = attrs.get("date_from")
+        date_to = attrs.get("date_to")
+        if date_from and date_to and date_from > date_to:
+            raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
+        return attrs
+
+
 class LeadCommentSerializer(serializers.ModelSerializer):
     author_username = serializers.CharField(source="author.username", read_only=True)
 
