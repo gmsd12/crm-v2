@@ -34,6 +34,7 @@ class LeadStatusSerializer(serializers.ModelSerializer):
             "is_default_for_new_leads",
             "is_active",
             "is_valid",
+            "work_bucket",
             "conversion_bucket",
             "created_at",
             "updated_at",
@@ -125,6 +126,7 @@ class LeadSerializer(serializers.ModelSerializer):
             "code": obj.status.code,
             "name": obj.status.name,
             "color": obj.status.color,
+            "work_bucket": obj.status.work_bucket,
         }
 
     def get_partner(self, obj):

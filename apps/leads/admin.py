@@ -65,10 +65,11 @@ class LeadStatusAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
         "is_default_for_new_leads",
         "is_active",
         "is_valid",
+        "work_bucket",
         "conversion_bucket",
         "is_deleted",
     )
-    list_filter = ("is_active", "is_valid", "is_deleted")
+    list_filter = ("is_active", "is_valid", "work_bucket", "is_deleted")
     search_fields = ("code", "name")
     ordering = ("order", "code")
     actions = ("soft_delete_selected", "restore_selected")

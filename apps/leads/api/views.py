@@ -73,6 +73,7 @@ def _status_payload(status_obj: LeadStatus | None) -> dict | None:
         "is_default_for_new_leads": status_obj.is_default_for_new_leads,
         "is_active": status_obj.is_active,
         "is_valid": status_obj.is_valid,
+        "work_bucket": status_obj.work_bucket,
         "conversion_bucket": status_obj.conversion_bucket,
         "is_deleted": status_obj.is_deleted,
         "created_at": status_obj.created_at.isoformat() if status_obj.created_at else None,
@@ -494,6 +495,7 @@ class LeadStatusViewSet(BaseStatusCatalogViewSet):
     filterset_fields = [
         "is_active",
         "is_valid",
+        "work_bucket",
         "conversion_bucket",
         "is_default_for_new_leads",
     ]
@@ -505,6 +507,7 @@ class LeadStatusViewSet(BaseStatusCatalogViewSet):
         "name",
         "is_active",
         "is_valid",
+        "work_bucket",
         "conversion_bucket",
         "is_default_for_new_leads",
         "created_at",
@@ -1889,6 +1892,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         valid_status_filter = Q(status__is_valid=True)
         lost_status_filter = Q(status__conversion_bucket=LeadStatus.ConversionBucket.LOST)
+        working_status_filter = Q(status__work_bucket=LeadStatus.WorkBucket.WORKING)
+        return_status_filter = Q(status__work_bucket=LeadStatus.WorkBucket.RETURN)
+        non_working_status_filter = Q(status__work_bucket=LeadStatus.WorkBucket.NON_WORKING)
 
         def _rate(numerator: int, denominator: int) -> float:
             if not denominator:
@@ -1920,7 +1926,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             total = partner_leads_received_qs.count()
             leads_in_status = list(
                 partner_leads_received_qs.exclude(status__isnull=True)
-                .values("status_id", "status__code", "status__name")
+                .values("status_id", "status__code", "status__name", "status__work_bucket")
                 .annotate(count=Count("id"))
                 .order_by("status__code")
             )
@@ -1928,6 +1934,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             invalid_count = max(total - valid_count, 0)
             won_count = partner_ftd_qs.values("lead_id").distinct().count()
             lost_count = partner_leads_received_qs.filter(lost_status_filter).count()
+            working_count = partner_leads_received_qs.filter(working_status_filter).count()
+            return_count = partner_leads_received_qs.filter(return_status_filter).count()
+            non_working_count = partner_leads_received_qs.filter(non_working_status_filter).count()
             same_day_won_count = (
                 partner_ftd_qs.filter(
                     lead__received_at__gte=period_start,
@@ -1958,6 +1967,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             invalid_rate = _rate(invalid_count, total)
             won_rate = _rate(won_count, total)
             lost_rate = _rate(lost_count, total)
+            working_rate = _rate(working_count, total)
+            return_rate = _rate(return_count, total)
+            non_working_rate = _rate(non_working_count, total)
             conversion_same_day_rate = _rate(same_day_won_count, total)
             conversion_cohort_rate = _rate(won_count, total)
 
@@ -1969,6 +1981,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                         "status_id": str(row["status_id"]),
                         "status_code": row["status__code"],
                         "status_name": row["status__name"],
+                        "work_bucket": row["status__work_bucket"],
                         "count": row["count"],
                         "rate": status_rate,
                         "percent": _percent(status_rate),
@@ -2012,6 +2025,15 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     "lost_total": lost_count,
                     "lost_rate": lost_rate,
                     "lost_percent": _percent(lost_rate),
+                    "working_total": working_count,
+                    "working_rate": working_rate,
+                    "working_percent": _percent(working_rate),
+                    "return_total": return_count,
+                    "return_rate": return_rate,
+                    "return_percent": _percent(return_rate),
+                    "non_working_total": non_working_count,
+                    "non_working_rate": non_working_rate,
+                    "non_working_percent": _percent(non_working_rate),
                 },
                 "conversion": {
                     "same_day": {

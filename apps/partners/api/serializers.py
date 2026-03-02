@@ -332,4 +332,5 @@ class LeadListSerializer(serializers.ModelSerializer):
             "code": obj.status.code,
             "name": obj.status.name,
             "color": obj.status.color,
+            "work_bucket": obj.status.work_bucket,
         }

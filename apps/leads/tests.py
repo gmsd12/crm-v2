@@ -51,6 +51,43 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 1)
 
+    def test_status_defaults_to_working_and_is_exposed_in_catalog(self):
+        admin = User.objects.create_user(username="admin_status_work_bucket", password="pass12345", role=UserRole.ADMIN)
+        self._auth(admin)
+
+        create_resp = self.client.post(
+            "/api/v1/leads/statuses/",
+            {
+                "code": "CALL_LATER",
+                "name": "Call Later",
+                "order": 30,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_resp.data["work_bucket"], LeadStatus.WorkBucket.WORKING)
+        status_obj = LeadStatus.objects.get(id=create_resp.data["id"])
+        self.assertEqual(status_obj.work_bucket, LeadStatus.WorkBucket.WORKING)
+
+    def test_lead_retrieve_exposes_status_work_bucket(self):
+        admin = User.objects.create_user(username="admin_status_on_lead", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Status On Lead", code="partner-status-on-lead")
+        status_obj = LeadStatus.objects.create(
+            code="CALL_BACK_LATER",
+            name="Call Back Later",
+            work_bucket=LeadStatus.WorkBucket.RETURN,
+            is_default_for_new_leads=True,
+        )
+        lead = Lead.objects.create(partner=partner, status=status_obj, phone="+15559901", custom_fields={})
+        self._auth(admin)
+
+        response = self.client.get(f"/api/v1/leads/records/{lead.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"]["work_bucket"], LeadStatus.WorkBucket.RETURN)
+
     def test_manager_and_ret_can_list_statuses(self):
         manager = User.objects.create_user(username="manager_status_list", password="pass12345", role=UserRole.MANAGER)
         LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
@@ -2088,13 +2125,21 @@ class LeadStatusCatalogApiTests(APITestCase):
             code="WON",
             name="Won",
             is_valid=True,
+            work_bucket=LeadStatus.WorkBucket.NON_WORKING,
             conversion_bucket=LeadStatus.ConversionBucket.WON,
         )
         status_lost = LeadStatus.objects.create(
             code="LOST",
             name="Lost",
             is_valid=True,
+            work_bucket=LeadStatus.WorkBucket.NON_WORKING,
             conversion_bucket=LeadStatus.ConversionBucket.LOST,
+        )
+        status_return = LeadStatus.objects.create(
+            code="CALL_LATER_METRICS",
+            name="Call Later Metrics",
+            is_valid=True,
+            work_bucket=LeadStatus.WorkBucket.RETURN,
         )
 
         lead_1 = Lead.objects.create(
@@ -2129,7 +2174,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             manager=manager,
             first_manager=manager,
             first_assigned_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
-            status=status_won,
+            status=status_return,
             custom_fields={},
             received_at=timezone.make_aware(datetime(2026, 1, 20, 10, 0, 0)),
         )
@@ -2149,6 +2194,9 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.data["overview"]["invalid_total"], 0)
         self.assertEqual(response.data["overview"]["won_total"], 2)
         self.assertEqual(response.data["overview"]["lost_total"], 1)
+        self.assertEqual(response.data["overview"]["working_total"], 0)
+        self.assertEqual(response.data["overview"]["return_total"], 1)
+        self.assertEqual(response.data["overview"]["non_working_total"], 2)
         self.assertEqual(response.data["conversion"]["cohort"]["count"], 2)
         self.assertEqual(response.data["conversion"]["cohort"]["rate"], 0.6667)
         self.assertEqual(response.data["conversion"]["same_day"]["count"], 1)
@@ -2157,8 +2205,12 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.data["won_by_manager"][0]["won_total"], 2)
 
         status_counts = {row["status_code"]: row["count"] for row in response.data["status_breakdown"]}
-        self.assertEqual(status_counts["WON"], 2)
+        self.assertEqual(status_counts["WON"], 1)
         self.assertEqual(status_counts["LOST"], 1)
+        self.assertEqual(status_counts["CALL_LATER_METRICS"], 1)
+        status_buckets = {row["status_code"]: row["work_bucket"] for row in response.data["status_breakdown"]}
+        self.assertEqual(status_buckets["WON"], LeadStatus.WorkBucket.NON_WORKING)
+        self.assertEqual(status_buckets["CALL_LATER_METRICS"], LeadStatus.WorkBucket.RETURN)
 
     def test_admin_can_get_leads_metrics_for_single_partner(self):
         admin = User.objects.create_user(username="admin_metrics_partner", password="pass12345", role=UserRole.ADMIN)

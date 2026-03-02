@@ -16,6 +16,11 @@ class LeadStatus(BaseModel):
         LOST = "LOST", "Lost"
         IGNORE = "IGNORE", "Ignore"
 
+    class WorkBucket(models.TextChoices):
+        WORKING = "WORKING", "Working"
+        RETURN = "RETURN", "Return"
+        NON_WORKING = "NON_WORKING", "Non-working"
+
     code = models.SlugField(max_length=64)
     name = models.CharField(max_length=255)
     order = models.PositiveIntegerField(default=100)
@@ -23,6 +28,12 @@ class LeadStatus(BaseModel):
     is_default_for_new_leads = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_valid = models.BooleanField(default=False, db_index=True)
+    work_bucket = models.CharField(
+        max_length=16,
+        choices=WorkBucket.choices,
+        default=WorkBucket.WORKING,
+        db_index=True,
+    )
     conversion_bucket = models.CharField(
         max_length=16,
         choices=ConversionBucket.choices,
