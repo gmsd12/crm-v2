@@ -640,6 +640,90 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(audit.payload_before["manager"]["id"], str(manager_old.id))
         self.assertEqual(audit.payload_after["manager"]["id"], str(manager_new.id))
 
+    def test_admin_can_reassign_and_override_first_manager_in_single_assign(self):
+        admin = User.objects.create_user(username="admin_assign_override_first", password="pass12345", role=UserRole.ADMIN)
+        manager_old = User.objects.create_user(username="manager_assign_override_old", password="pass12345", role=UserRole.MANAGER)
+        manager_new = User.objects.create_user(username="manager_assign_override_new", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Assign Override First", code="partner-assign-override-first")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager_old,
+            first_manager=manager_old,
+            first_assigned_at=timezone.make_aware(datetime(2026, 1, 1, 10, 0, 0)),
+            status=status_new,
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/assign-manager/",
+            {
+                "manager": manager_new.id,
+                "set_as_first_manager": True,
+                "first_assigned_at": "2026-01-15T12:30:00Z",
+                "reason": "ownership correction",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, manager_new.id)
+        self.assertEqual(lead.first_manager_id, manager_new.id)
+        self.assertEqual(lead.first_assigned_at.isoformat(), "2026-01-15T12:30:00+00:00")
+        audit = LeadAuditLog.objects.get(lead=lead, event_type=LeadAuditEvent.FIRST_MANAGER_CHANGED)
+        self.assertEqual(audit.reason, "ownership correction")
+        self.assertEqual(audit.payload_before["first_manager"]["id"], str(manager_old.id))
+        self.assertEqual(audit.payload_after["first_manager"]["id"], str(manager_new.id))
+        logged_first_assigned_at = datetime.fromisoformat(audit.payload_after["first_assigned_at"])
+        self.assertEqual(logged_first_assigned_at.timestamp(), lead.first_assigned_at.timestamp())
+
+    def test_teamleader_can_override_first_manager_during_assign_but_cannot_set_first_assigned_at(self):
+        teamleader = User.objects.create_user(username="tl_assign_override_first", password="pass12345", role=UserRole.TEAMLEADER)
+        manager_old = User.objects.create_user(username="manager_assign_override_scope", password="pass12345", role=UserRole.MANAGER)
+        manager_new = User.objects.create_user(username="manager_assign_override_target", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner TL Assign Override First", code="partner-tl-assign-override-first")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager_old,
+            first_manager=manager_old,
+            first_assigned_at=timezone.make_aware(datetime(2026, 1, 2, 10, 0, 0)),
+            status=status_new,
+            custom_fields={},
+        )
+        self._auth(teamleader)
+
+        denied = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/assign-manager/",
+            {
+                "manager": manager_new.id,
+                "set_as_first_manager": True,
+                "first_assigned_at": "2026-01-16T12:30:00Z",
+            },
+            format="json",
+        )
+
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        response = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/assign-manager/",
+            {
+                "manager": manager_new.id,
+                "set_as_first_manager": True,
+                "reason": "teamlead correction",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertEqual(lead.manager_id, manager_new.id)
+        self.assertEqual(lead.first_manager_id, manager_new.id)
+        self.assertIsNotNone(lead.first_assigned_at)
+        self.assertGreater(lead.first_assigned_at, timezone.make_aware(datetime(2026, 1, 2, 10, 0, 0)))
+
     def test_teamleader_can_assign_ret_to_single_lead(self):
         teamleader = User.objects.create_user(username="tl_assign_ret", password="pass12345", role=UserRole.TEAMLEADER)
         manager_owner = User.objects.create_user(username="manager_assign_ret", password="pass12345", role=UserRole.MANAGER)
@@ -943,6 +1027,60 @@ class LeadStatusCatalogApiTests(APITestCase):
                 event_type=LeadAuditEvent.MANAGER_ASSIGNED,
                 lead_id__in=[lead_1.id, lead_2.id],
                 reason="bulk distribution",
+            ).count(),
+            2,
+        )
+
+    def test_admin_can_bulk_assign_and_override_first_manager(self):
+        admin = User.objects.create_user(username="admin_assign_bulk_first", password="pass12345", role=UserRole.ADMIN)
+        manager_old = User.objects.create_user(username="manager_assign_bulk_first_old", password="pass12345", role=UserRole.MANAGER)
+        manager_target = User.objects.create_user(
+            username="manager_assign_bulk_first_target",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        partner = Partner.objects.create(name="Partner Assign Bulk First", code="partner-assign-bulk-first")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead_1 = Lead.objects.create(
+            partner=partner,
+            manager=manager_old,
+            first_manager=manager_old,
+            status=status_new,
+            custom_fields={},
+        )
+        lead_2 = Lead.objects.create(
+            partner=partner,
+            manager=manager_old,
+            first_manager=manager_old,
+            status=status_new,
+            custom_fields={},
+        )
+        self._auth(admin)
+
+        response = self.client.post(
+            "/api/v1/leads/records/bulk-assign-manager/",
+            {
+                "lead_ids": [str(lead_1.id), str(lead_2.id)],
+                "manager": manager_target.id,
+                "set_as_first_manager": True,
+                "first_assigned_at": "2026-01-20T09:45:00Z",
+                "reason": "bulk ownership correction",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead_1.refresh_from_db()
+        lead_2.refresh_from_db()
+        self.assertEqual(lead_1.first_manager_id, manager_target.id)
+        self.assertEqual(lead_2.first_manager_id, manager_target.id)
+        self.assertEqual(lead_1.first_assigned_at.isoformat(), "2026-01-20T09:45:00+00:00")
+        self.assertEqual(lead_2.first_assigned_at.isoformat(), "2026-01-20T09:45:00+00:00")
+        self.assertEqual(
+            LeadAuditLog.objects.filter(
+                event_type=LeadAuditEvent.FIRST_MANAGER_CHANGED,
+                lead_id__in=[lead_1.id, lead_2.id],
+                reason="bulk ownership correction",
             ).count(),
             2,
         )

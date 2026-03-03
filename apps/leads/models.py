@@ -226,6 +226,7 @@ class LeadAuditEvent(models.TextChoices):
     MANAGER_ASSIGNED = "manager_assigned", "Manager Assigned"
     MANAGER_REASSIGNED = "manager_reassigned", "Manager Reassigned"
     MANAGER_UNASSIGNED = "manager_unassigned", "Manager Unassigned"
+    FIRST_MANAGER_CHANGED = "first_manager_changed", "First Manager Changed"
     LEAD_CREATED = "lead_created", "Lead Created"
     LEAD_UPDATED = "lead_updated", "Lead Updated"
     LEAD_SOFT_DELETED = "lead_soft_deleted", "Lead Soft Deleted"

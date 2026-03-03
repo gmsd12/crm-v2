@@ -357,6 +357,40 @@ def _log_manager_audit(
     )
 
 
+def _log_first_manager_audit(
+    *,
+    lead: Lead,
+    actor_user,
+    source: str,
+    reason: str,
+    from_manager,
+    to_manager,
+    before_first_assigned_at,
+    after_first_assigned_at,
+    batch_id: str = "",
+) -> None:
+    _log_status_audit(
+        event_type=LeadAuditEvent.FIRST_MANAGER_CHANGED,
+        actor_user=actor_user,
+        source=source,
+        entity_type=LeadAuditEntity.LEAD,
+        entity_id=str(lead.id),
+        batch_id=batch_id,
+        reason=reason,
+        lead=lead,
+        payload_before={
+            "lead_id": str(lead.id),
+            "first_manager": _manager_payload(from_manager),
+            "first_assigned_at": before_first_assigned_at.isoformat() if before_first_assigned_at else None,
+        },
+        payload_after={
+            "lead_id": str(lead.id),
+            "first_manager": _manager_payload(to_manager),
+            "first_assigned_at": after_first_assigned_at.isoformat() if after_first_assigned_at else None,
+        },
+    )
+
+
 def _status_change_error_for_lead(
     *,
     lead: Lead,
@@ -1417,6 +1451,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             after_name = after_manager.get("username") or "Unassigned"
             return f"{before_name} -> {after_name}"
 
+        if audit.event_type == LeadAuditEvent.FIRST_MANAGER_CHANGED:
+            before_manager = (
+                payload_before.get("first_manager") if isinstance(payload_before.get("first_manager"), dict) else {}
+            )
+            after_manager = (
+                payload_after.get("first_manager") if isinstance(payload_after.get("first_manager"), dict) else {}
+            )
+            before_name = before_manager.get("username") or "Unassigned"
+            after_name = after_manager.get("username") or "Unassigned"
+            return f"{before_name} -> {after_name}"
+
         if audit.event_type in {
             LeadAuditEvent.DEPOSIT_CREATED,
             LeadAuditEvent.DEPOSIT_UPDATED,
@@ -1539,6 +1584,22 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
             return
         raise PermissionDenied("Teamleaders can change first_manager only for manager/teamleader leads")
+
+    def _assert_assign_first_manager_override_allowed(self, *, first_assigned_at_provided: bool):
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+            return
+        if role == UserRole.TEAMLEADER:
+            if first_assigned_at_provided:
+                raise PermissionDenied("Teamleaders cannot set first_assigned_at manually during assign")
+            return
+        raise PermissionDenied("Only teamleaders, admins and superusers can override first_manager during assign")
+
+    def _resolve_assign_first_assigned_at(self, *, requested_first_assigned_at):
+        role = getattr(self.request.user, "role", None)
+        if requested_first_assigned_at is not None and role in {UserRole.ADMIN, UserRole.SUPERUSER}:
+            return requested_first_assigned_at
+        return timezone.now()
 
     def _assert_update_payload_allowed(self, lead: Lead):
         role = getattr(self.request.user, "role", None)
@@ -1961,11 +2022,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         lead = self.get_object()
         self._assert_can_change_first_manager_for_lead(lead)
-        before = {
-            "lead_id": str(lead.id),
-            "first_manager": _manager_payload(getattr(lead, "first_manager", None)),
-            "first_assigned_at": lead.first_assigned_at.isoformat() if lead.first_assigned_at else None,
-        }
+        previous_first_manager = getattr(lead, "first_manager", None)
+        previous_first_assigned_at = lead.first_assigned_at
         lead.first_manager = manager
         update_fields = ["first_manager", "updated_at"]
         if first_assigned_at is not None:
@@ -1975,21 +2033,15 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             lead.first_assigned_at = timezone.now()
             update_fields.append("first_assigned_at")
         lead.save(update_fields=update_fields)
-        after = {
-            "lead_id": str(lead.id),
-            "first_manager": _manager_payload(getattr(lead, "first_manager", None)),
-            "first_assigned_at": lead.first_assigned_at.isoformat() if lead.first_assigned_at else None,
-        }
-        _log_status_audit(
-            event_type=LeadAuditEvent.LEAD_UPDATED,
+        _log_first_manager_audit(
+            lead=lead,
             actor_user=request.user,
             source=LeadAuditSource.API,
-            entity_type=LeadAuditEntity.LEAD,
-            entity_id=str(lead.id),
-            lead=lead,
             reason=reason,
-            payload_before=before,
-            payload_after=after,
+            from_manager=previous_first_manager,
+            to_manager=getattr(lead, "first_manager", None),
+            before_first_assigned_at=previous_first_assigned_at,
+            after_first_assigned_at=lead.first_assigned_at,
         )
         return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
 
@@ -1999,6 +2051,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             {
                 "lead_id": str(pk),
                 "manager": str(request.data.get("manager") or ""),
+                "set_as_first_manager": bool(request.data.get("set_as_first_manager", False)),
+                "first_assigned_at": request.data.get("first_assigned_at"),
                 "reason": (request.data.get("reason") or "").strip(),
             }
         )
@@ -2014,6 +2068,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             serializer = LeadAssignManagerSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             manager = serializer.validated_data["manager"]
+            set_as_first_manager = serializer.validated_data.get("set_as_first_manager", False)
+            requested_first_assigned_at = serializer.validated_data.get("first_assigned_at")
             reason = serializer.validated_data.get("reason", "")
 
             lead = (
@@ -2022,13 +2078,27 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 .get(id=pk)
             )
             self._assert_can_manage_assignment(lead, operation="assign")
+            if set_as_first_manager:
+                self._assert_assign_first_manager_override_allowed(
+                    first_assigned_at_provided=requested_first_assigned_at is not None
+                )
             previous_manager = lead.manager
+            previous_first_manager = getattr(lead, "first_manager", None)
+            previous_first_assigned_at = lead.first_assigned_at
             update_fields = ["manager", "updated_at"]
             if getattr(previous_manager, "id", None) != manager.id:
                 lead.assigned_at = timezone.now()
                 update_fields.append("assigned_at")
             lead.manager = manager
-            _set_first_manager_if_needed(lead, update_fields=update_fields)
+            if set_as_first_manager:
+                lead.first_manager = manager
+                update_fields.append("first_manager")
+                lead.first_assigned_at = self._resolve_assign_first_assigned_at(
+                    requested_first_assigned_at=requested_first_assigned_at
+                )
+                update_fields.append("first_assigned_at")
+            else:
+                _set_first_manager_if_needed(lead, update_fields=update_fields)
             lead.save(update_fields=update_fields)
             _log_manager_audit(
                 lead=lead,
@@ -2038,6 +2108,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 from_manager=previous_manager,
                 to_manager=manager,
             )
+            if set_as_first_manager:
+                _log_first_manager_audit(
+                    lead=lead,
+                    actor_user=request.user,
+                    source=LeadAuditSource.API,
+                    reason=reason,
+                    from_manager=previous_first_manager,
+                    to_manager=getattr(lead, "first_manager", None),
+                    before_first_assigned_at=previous_first_assigned_at,
+                    after_first_assigned_at=lead.first_assigned_at,
+                )
 
             response_payload = LeadSerializer(lead).data
             _save_idempotency_response(
@@ -2100,12 +2181,16 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         lead_ids = serializer.validated_data["_lead_ids"]
         manager = serializer.validated_data["manager"]
+        set_as_first_manager = serializer.validated_data.get("set_as_first_manager", False)
+        requested_first_assigned_at = serializer.validated_data.get("first_assigned_at")
         reason = serializer.validated_data.get("reason", "")
         allow_partial = serializer.validated_data.get("allow_partial", False)
         payload_hash = _request_hash(
             {
                 "lead_ids": [str(lead_id) for lead_id in lead_ids],
                 "manager": str(manager.id),
+                "set_as_first_manager": set_as_first_manager,
+                "first_assigned_at": requested_first_assigned_at.isoformat() if requested_first_assigned_at else None,
                 "reason": reason,
                 "allow_partial": allow_partial,
             }
@@ -2124,9 +2209,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if cached_response is not None:
                 return cached_response
 
+            if set_as_first_manager:
+                self._assert_assign_first_manager_override_allowed(
+                    first_assigned_at_provided=requested_first_assigned_at is not None
+                )
+
             locked_leads = list(
                 Lead.objects.select_for_update()
-                .select_related("manager")
+                .select_related("manager", "first_manager")
                 .filter(id__in=lead_ids)
             )
             leads_map = {lead.id: lead for lead in locked_leads}
@@ -2142,12 +2232,22 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     continue
                 self._assert_can_manage_assignment(lead, operation="assign")
                 previous_manager = lead.manager
+                previous_first_manager = getattr(lead, "first_manager", None)
+                previous_first_assigned_at = lead.first_assigned_at
                 update_fields = ["manager", "updated_at"]
                 if getattr(previous_manager, "id", None) != manager.id:
                     lead.assigned_at = timezone.now()
                     update_fields.append("assigned_at")
                 lead.manager = manager
-                _set_first_manager_if_needed(lead, update_fields=update_fields)
+                if set_as_first_manager:
+                    lead.first_manager = manager
+                    update_fields.append("first_manager")
+                    lead.first_assigned_at = self._resolve_assign_first_assigned_at(
+                        requested_first_assigned_at=requested_first_assigned_at
+                    )
+                    update_fields.append("first_assigned_at")
+                else:
+                    _set_first_manager_if_needed(lead, update_fields=update_fields)
                 lead.save(update_fields=update_fields)
                 _log_manager_audit(
                     lead=lead,
@@ -2158,6 +2258,18 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     to_manager=manager,
                     batch_id=batch_id,
                 )
+                if set_as_first_manager:
+                    _log_first_manager_audit(
+                        lead=lead,
+                        actor_user=request.user,
+                        source=LeadAuditSource.API,
+                        reason=reason,
+                        from_manager=previous_first_manager,
+                        to_manager=getattr(lead, "first_manager", None),
+                        before_first_assigned_at=previous_first_assigned_at,
+                        after_first_assigned_at=lead.first_assigned_at,
+                        batch_id=batch_id,
+                    )
                 updated_ids.append(str(lead.id))
 
             refreshed_leads = list(

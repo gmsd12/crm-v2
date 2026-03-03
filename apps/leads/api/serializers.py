@@ -274,9 +274,15 @@ class BulkLeadStatusChangeSerializer(serializers.Serializer):
 
 class LeadAssignManagerSerializer(serializers.Serializer):
     manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    set_as_first_manager = serializers.BooleanField(required=False, default=False)
+    first_assigned_at = serializers.DateTimeField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
     def validate(self, attrs):
+        if "first_assigned_at" in attrs and attrs["first_assigned_at"] is not None:
+            dt = attrs["first_assigned_at"]
+            if timezone.is_naive(dt):
+                attrs["first_assigned_at"] = timezone.make_aware(dt, timezone.get_current_timezone())
         attrs["reason"] = (attrs.get("reason") or "").strip()
         return attrs
 
@@ -301,6 +307,8 @@ class BulkLeadAssignManagerSerializer(serializers.Serializer):
         allow_empty=False,
     )
     manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
+    set_as_first_manager = serializers.BooleanField(required=False, default=False)
+    first_assigned_at = serializers.DateTimeField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
     allow_partial = serializers.BooleanField(required=False, default=False)
 
@@ -309,6 +317,10 @@ class BulkLeadAssignManagerSerializer(serializers.Serializer):
         max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
         if len(unique_ids) > max_ids:
             raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+        if "first_assigned_at" in attrs and attrs["first_assigned_at"] is not None:
+            dt = attrs["first_assigned_at"]
+            if timezone.is_naive(dt):
+                attrs["first_assigned_at"] = timezone.make_aware(dt, timezone.get_current_timezone())
         attrs["reason"] = (attrs.get("reason") or "").strip()
         attrs["_lead_ids"] = unique_ids
         return attrs
