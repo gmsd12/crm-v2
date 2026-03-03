@@ -971,6 +971,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     current = current.replace(year=current.year + 1, month=1)
                 else:
                     current = current.replace(month=current.month + 1)
+            months.reverse()
             return months
 
         normalized = []
@@ -981,7 +982,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 continue
             seen.add(month_key)
             normalized.append(month_key)
-        normalized.sort()
+        normalized.sort(reverse=True)
         return normalized
 
     @staticmethod

@@ -4050,19 +4050,19 @@ class LeadStatusCatalogApiTests(APITestCase):
             [
                 {
                     "year": 2026,
-                    "month": 1,
-                    "month_key": "2026-01",
-                    "month_label": "2026-01",
-                    "ftd_count": 1,
-                    "non_ftd_total_amount": "40.00",
-                },
-                {
-                    "year": 2026,
                     "month": 2,
                     "month_key": "2026-02",
                     "month_label": "2026-02",
                     "ftd_count": 1,
                     "non_ftd_total_amount": "25.00",
+                },
+                {
+                    "year": 2026,
+                    "month": 1,
+                    "month_key": "2026-01",
+                    "month_label": "2026-01",
+                    "ftd_count": 1,
+                    "non_ftd_total_amount": "40.00",
                 },
             ],
         )
@@ -4096,8 +4096,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(
             response.data["columns"],
             [
-                {"year": 2026, "month": 1, "month_key": "2026-01", "month_label": "2026-01"},
                 {"year": 2026, "month": 2, "month_key": "2026-02", "month_label": "2026-02"},
+                {"year": 2026, "month": 1, "month_key": "2026-01", "month_label": "2026-01"},
             ],
         )
         self.assertEqual(len(response.data["rows"]), 1)
@@ -4105,6 +4105,50 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(row["user"]["id"], str(manager.id))
         self.assertEqual(row["total_ftd"], 1)
         self.assertEqual(row["cells"], {"2026-01": 1, "2026-02": 0})
+
+    def test_deposit_stats_default_to_current_year_when_dates_missing(self):
+        admin = User.objects.create_user(username="admin_dep_stats_default_dates", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(
+            username="manager_dep_stats_default_dates",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        partner = Partner.objects.create(name="Partner Deposit Stats Default Dates", code="partner-dep-stats-default-dates")
+        current_year = timezone.localdate().year
+        current_lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991217", custom_fields={})
+        old_lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991218", custom_fields={})
+        current_ftd = LeadDeposit.objects.create(
+            lead=current_lead,
+            creator=manager,
+            amount="100.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        old_ftd = LeadDeposit.objects.create(
+            lead=old_lead,
+            creator=manager,
+            amount="90.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        self._set_deposit_created_at(
+            current_ftd,
+            timezone.make_aware(datetime(current_year, 1, 15, 10, 0, 0)),
+        )
+        self._set_deposit_created_at(
+            old_ftd,
+            timezone.make_aware(datetime(current_year - 1, 12, 15, 10, 0, 0)),
+        )
+        self._auth(admin)
+
+        response = self.client.get("/api/v1/leads/deposits/stats/monthly/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["period"]["date_from"], f"{current_year}-01-01")
+        self.assertEqual(response.data["period"]["date_to"], timezone.localdate().isoformat())
+        self.assertEqual(response.data["summary"]["ftd_count"], 1)
+        self.assertEqual(len(response.data["items"]), timezone.localdate().month)
+        self.assertEqual(response.data["items"][0]["month_key"], timezone.localdate().replace(day=1).strftime("%Y-%m"))
+        january_item = next(item for item in response.data["items"] if item["month_key"] == f"{current_year}-01")
+        self.assertEqual(january_item["ftd_count"], 1)
 
     def test_deposits_endpoint_admin_can_create_update_soft_delete_restore_and_audit(self):
         admin = User.objects.create_user(username="admin_dep_crud", password="pass12345", role=UserRole.ADMIN)
