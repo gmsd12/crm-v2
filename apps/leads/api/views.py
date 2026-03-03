@@ -41,11 +41,9 @@ User = get_user_model()
 
 from .serializers import (
     BulkLeadAssignManagerSerializer,
-    LeadCloseWonTransferSerializer,
     LeadDepositCreateSerializer,
     LeadDepositSerializer,
     LeadDepositWriteSerializer,
-    LeadRollbackRetTransferSerializer,
     BulkLeadUnassignManagerSerializer,
     BulkLeadStatusChangeSerializer,
     LeadAssignManagerSerializer,
@@ -298,42 +296,6 @@ def _next_deposit_type(lead: Lead, *, actor_role: str | None = None) -> int:
 
     # If lead history started without FTD (RET-side manual work), continue as normal deposits.
     return LeadDeposit.Type.DEPOSIT
-
-
-def _resolve_rollback_manager(lead: Lead):
-    candidate_ids: list[int] = []
-    transfer_log = (
-        LeadAuditLog.objects.filter(
-            lead=lead,
-            event_type=LeadAuditEvent.RET_TRANSFERRED,
-        )
-        .order_by("-created_at", "-id")
-        .first()
-    )
-    if transfer_log and isinstance(transfer_log.payload_after, dict):
-        transfer_payload = transfer_log.payload_after.get("transfer")
-        if isinstance(transfer_payload, dict):
-            from_manager_id = transfer_payload.get("from_manager_id")
-            transfer_author_id = transfer_payload.get("transfer_author_id")
-            for raw_id in (from_manager_id, transfer_author_id):
-                try:
-                    parsed = int(raw_id)
-                except (TypeError, ValueError):
-                    continue
-                candidate_ids.append(parsed)
-
-    if lead.first_manager_id:
-        candidate_ids.append(int(lead.first_manager_id))
-
-    seen: set[int] = set()
-    for candidate_id in candidate_ids:
-        if candidate_id in seen:
-            continue
-        seen.add(candidate_id)
-        candidate = User.objects.filter(id=candidate_id, is_active=True).first()
-        if candidate and candidate.role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
-            return candidate
-    return None
 
 
 def _log_status_audit(
@@ -1298,8 +1260,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "bulk_unassign_manager": (Perm.LEADS_ASSIGN_MANAGER,),
         "change_status": (Perm.LEADS_STATUS_WRITE,),
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
-        "close_won_transfer": (Perm.LEADS_WRITE,),
-        "rollback_ret_transfer": (Perm.LEADS_WRITE,),
         "deposits": (Perm.LEADS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
@@ -1460,7 +1420,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if audit.event_type in {
             LeadAuditEvent.DEPOSIT_CREATED,
             LeadAuditEvent.DEPOSIT_UPDATED,
-            LeadAuditEvent.DEPOSIT_REVERSED,
             LeadAuditEvent.DEPOSIT_SOFT_DELETED,
             LeadAuditEvent.DEPOSIT_RESTORED,
             LeadAuditEvent.DEPOSIT_HARD_DELETED,
@@ -1481,13 +1440,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             body = payload_after.get("body") if isinstance(payload_after, dict) else None
             if isinstance(body, str) and body:
                 return body[:160]
-
-        if audit.event_type == LeadAuditEvent.RET_TRANSFERRED:
-            transfer = payload_after.get("transfer") if isinstance(payload_after.get("transfer"), dict) else {}
-            from_manager_id = transfer.get("from_manager_id")
-            target_manager_id = transfer.get("target_manager_id")
-            if from_manager_id and target_manager_id:
-                return f"manager {from_manager_id} -> {target_manager_id}"
 
         return (audit.reason or "").strip()
 
@@ -1668,54 +1620,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             "Only teamleaders (own/manager/teamleader leads), admins, and superusers can use force status change"
         )
 
-    def _assert_can_transfer_to_ret(self, *, lead: Lead):
-        role = getattr(self.request.user, "role", None)
-        if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
-            return
-        if role == UserRole.TEAMLEADER:
-            if self._teamleader_can_manage_manager_scope(lead):
-                return
-            raise PermissionDenied("Teamleaders can handoff only own and manager/teamleader leads")
-        if role == UserRole.MANAGER and lead.manager_id == self.request.user.id:
-            return
-        raise PermissionDenied("You cannot handoff this lead")
-
-    def _resolve_transfer_author(self, *, lead: Lead, transfer_author):
-        role = getattr(self.request.user, "role", None)
-        if role == UserRole.MANAGER:
-            return self.request.user
-
-        if role == UserRole.TEAMLEADER:
-            if transfer_author is None:
-                raise serializers.ValidationError({"transfer_author": "transfer_author is required for teamleaders"})
-            if transfer_author.role == UserRole.TEAMLEADER:
-                if transfer_author.id != self.request.user.id:
-                    raise PermissionDenied("Teamleaders can set only themselves as TEAMLEADER transfer_author")
-                return transfer_author
-            if transfer_author.role == UserRole.MANAGER:
-                if lead.manager_id != transfer_author.id:
-                    raise serializers.ValidationError(
-                        {"transfer_author": "For manager author, select current lead manager"}
-                    )
-                return transfer_author
-            raise serializers.ValidationError({"transfer_author": "transfer_author must be MANAGER or TEAMLEADER"})
-
-        if role in {UserRole.ADMIN, UserRole.SUPERUSER}:
-            if transfer_author is not None:
-                return transfer_author
-            current_manager = getattr(lead, "manager", None)
-            if current_manager and getattr(current_manager, "role", None) in {UserRole.MANAGER, UserRole.TEAMLEADER}:
-                return current_manager
-            return self.request.user
-
-        return self.request.user
-
-    def _assert_can_rollback_ret_transfer(self):
-        role = getattr(self.request.user, "role", None)
-        if role in {UserRole.SUPERUSER, UserRole.ADMIN, UserRole.TEAMLEADER}:
-            return
-        raise PermissionDenied("Only teamleaders, admins and superusers can rollback RET transfer")
-
     def create(self, request, *args, **kwargs):
         self._assert_can_create()
         self._assert_create_payload_allowed()
@@ -1832,234 +1736,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             reason=serializer.validated_data.get("reason", ""),
         )
         return Response(LeadDepositSerializer(dep).data, status=status.HTTP_201_CREATED)
-
-    @action(detail=True, methods=["post"], url_path="close-won-transfer")
-    def close_won_transfer(self, request, pk=None):
-        serializer = LeadCloseWonTransferSerializer(data=request.data, context={"request": request})
-        serializer.is_valid(raise_exception=True)
-        to_status = serializer.validated_data["to_status"]
-        reason = serializer.validated_data.get("reason", "")
-        comment_body = serializer.validated_data.get("comment")
-        force_status = serializer.validated_data.get("force_status", False)
-        requested_transfer_author = serializer.validated_data.get("transfer_author")
-
-        with transaction.atomic():
-            lead = (
-                Lead.objects.select_for_update()
-                .select_related("manager", "status")
-                .get(id=pk)
-            )
-            self._assert_can_transfer_to_ret(lead=lead)
-
-            existing_deposits = LeadDeposit.objects.filter(lead=lead).order_by("created_at", "id")
-            non_ftd_exists = existing_deposits.exclude(type=LeadDeposit.Type.FTD).exists()
-            if non_ftd_exists:
-                raise serializers.ValidationError("Cannot transfer to RET: lead already has non-FTD deposits")
-
-            from_manager = lead.manager
-            if from_manager is None:
-                raise serializers.ValidationError("Lead must have assigned manager before transfer to RET")
-            if getattr(from_manager, "role", None) == UserRole.RET:
-                raise serializers.ValidationError("Lead is already assigned to RET")
-            transfer_author = self._resolve_transfer_author(lead=lead, transfer_author=requested_transfer_author)
-
-            if to_status.id != lead.status_id:
-                if force_status:
-                    self._assert_can_force_status_change(lead=lead)
-                status_change_error = _status_change_error_for_lead(
-                    lead=lead,
-                    to_status=to_status,
-                )
-                if status_change_error:
-                    raise _status_change_error_as_validation_error(status_change_error)
-
-            now = timezone.now()
-            dep = existing_deposits.filter(type=LeadDeposit.Type.FTD).first()
-            created_ftd = False
-            if dep is None:
-                dep = LeadDeposit.objects.create(
-                    lead=lead,
-                    creator=transfer_author,
-                    amount=serializer.validated_data["amount"],
-                    type=LeadDeposit.Type.FTD,
-                )
-                created_ftd = True
-            elif existing_deposits.filter(type=LeadDeposit.Type.FTD).count() > 1:
-                raise serializers.ValidationError("Cannot transfer to RET: multiple FTD records found")
-
-            before = _lead_payload(lead)
-            lead.manager = serializer.validated_data["ret_manager"]
-            lead.assigned_at = now
-
-            update_fields = [
-                "manager",
-                "assigned_at",
-                "updated_at",
-            ]
-            if to_status.id != lead.status_id:
-                lead.status = to_status
-                update_fields.append("status")
-            lead.save(update_fields=sorted(set(update_fields)))
-            created_comment = None
-            if comment_body:
-                created_comment = LeadComment.objects.create(
-                    lead=lead,
-                    author=request.user,
-                    body=comment_body,
-                )
-            contact_dt = None
-            if created_ftd:
-                contact_dt = dep.created_at
-            if created_comment is not None:
-                comment_created_at = created_comment.created_at
-                if contact_dt is None or comment_created_at > contact_dt:
-                    contact_dt = comment_created_at
-            if contact_dt is not None:
-                _touch_lead_last_contacted(lead, at=contact_dt)
-
-            _log_manager_audit(
-                lead=lead,
-                actor_user=request.user,
-                source=LeadAuditSource.API,
-                reason=reason,
-                from_manager=from_manager,
-                to_manager=lead.manager,
-            )
-            if created_ftd:
-                _log_status_audit(
-                    event_type=LeadAuditEvent.DEPOSIT_CREATED,
-                    actor_user=transfer_author,
-                    source=LeadAuditSource.API,
-                    entity_type=LeadAuditEntity.LEAD,
-                    entity_id=str(lead.id),
-                    lead=lead,
-                    reason=reason,
-                    payload_after=_deposit_payload(dep),
-                )
-            if created_comment is not None:
-                _log_status_audit(
-                    event_type=LeadAuditEvent.COMMENT_CREATED,
-                    actor_user=request.user,
-                    source=LeadAuditSource.API,
-                    entity_type=LeadAuditEntity.LEAD_COMMENT,
-                    entity_id=str(created_comment.id),
-                    lead=lead,
-                    reason=reason,
-                    payload_after=_comment_payload(created_comment),
-                )
-            _log_status_audit(
-                event_type=LeadAuditEvent.RET_TRANSFERRED,
-                actor_user=request.user,
-                source=LeadAuditSource.API,
-                entity_type=LeadAuditEntity.LEAD,
-                entity_id=str(lead.id),
-                lead=lead,
-                reason=reason,
-                payload_before=before,
-                payload_after={
-                    "lead": _lead_payload(lead),
-                    "transfer": {
-                        "from_manager_id": str(from_manager.id) if from_manager else None,
-                        "target_manager_id": str(lead.manager_id) if lead.manager_id else None,
-                        "to_ret_id": (
-                            str(lead.manager_id)
-                            if lead.manager_id and getattr(lead.manager, "role", None) == UserRole.RET
-                            else None
-                        ),
-                        "transfer_author_id": str(transfer_author.id) if transfer_author else None,
-                        "performed_by_user_id": str(request.user.id),
-                        "transferred_at": now.isoformat(),
-                    },
-                    "ftd": _deposit_payload(dep),
-                    "comment": _comment_payload(created_comment),
-                },
-            )
-
-        lead.refresh_from_db()
-        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["post"], url_path="rollback-ret-transfer")
-    def rollback_ret_transfer(self, request, pk=None):
-        serializer = LeadRollbackRetTransferSerializer(data=request.data or {})
-        serializer.is_valid(raise_exception=True)
-        self._assert_can_rollback_ret_transfer()
-
-        with transaction.atomic():
-            lead = (
-                Lead.objects.select_for_update()
-                .select_related("manager", "first_manager")
-                .get(id=pk)
-            )
-            if getattr(getattr(lead, "manager", None), "role", None) not in {
-                UserRole.RET,
-                UserRole.ADMIN,
-                UserRole.SUPERUSER,
-            }:
-                raise serializers.ValidationError("Active RET transfer not found")
-            rollback_manager = _resolve_rollback_manager(lead)
-            if rollback_manager is None:
-                raise serializers.ValidationError("Cannot rollback transfer: source manager not found")
-
-            if LeadDeposit.objects.filter(lead=lead).exclude(type=LeadDeposit.Type.FTD).exists():
-                raise serializers.ValidationError("Cannot rollback transfer: lead already has non-FTD deposits")
-
-            ftd = LeadDeposit.objects.filter(lead=lead, type=LeadDeposit.Type.FTD).order_by("-created_at").first()
-            if not ftd:
-                raise serializers.ValidationError("Cannot rollback transfer: FTD not found")
-
-            before_lead = _lead_payload(lead)
-            before_ftd = _deposit_payload(ftd)
-            ftd.delete()
-
-            previous_manager = lead.manager
-            rollback_ts = timezone.now()
-            lead.manager = rollback_manager
-            lead.assigned_at = rollback_ts
-            lead.save(
-                update_fields=[
-                    "manager",
-                    "assigned_at",
-                    "updated_at",
-                ]
-            )
-
-            _log_manager_audit(
-                lead=lead,
-                actor_user=request.user,
-                source=LeadAuditSource.API,
-                reason=serializer.validated_data.get("reason", ""),
-                from_manager=previous_manager,
-                to_manager=lead.manager,
-            )
-            _log_status_audit(
-                event_type=LeadAuditEvent.DEPOSIT_REVERSED,
-                actor_user=request.user,
-                source=LeadAuditSource.API,
-                entity_type=LeadAuditEntity.LEAD,
-                entity_id=str(lead.id),
-                lead=lead,
-                reason=serializer.validated_data.get("reason", ""),
-                payload_before=before_ftd,
-                payload_after=_deposit_payload(ftd),
-            )
-            _log_status_audit(
-                event_type=LeadAuditEvent.RET_TRANSFER_ROLLBACK,
-                actor_user=request.user,
-                source=LeadAuditSource.API,
-                entity_type=LeadAuditEntity.LEAD,
-                entity_id=str(lead.id),
-                lead=lead,
-                reason=serializer.validated_data.get("reason", ""),
-                payload_before=before_lead,
-                payload_after={
-                    "lead": _lead_payload(lead),
-                    "rollback_to_manager_id": str(rollback_manager.id),
-                    "rolled_back_at": rollback_ts.isoformat(),
-                },
-            )
-
-        lead.refresh_from_db()
-        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):

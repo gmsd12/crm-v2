@@ -240,12 +240,9 @@ class LeadAuditEvent(models.TextChoices):
     DUPLICATE_REJECTED = "duplicate_rejected", "Duplicate Rejected"
     DEPOSIT_CREATED = "deposit_created", "Deposit Created"
     DEPOSIT_UPDATED = "deposit_updated", "Deposit Updated"
-    DEPOSIT_REVERSED = "deposit_reversed", "Deposit Reversed"
     DEPOSIT_SOFT_DELETED = "deposit_soft_deleted", "Deposit Soft Deleted"
     DEPOSIT_RESTORED = "deposit_restored", "Deposit Restored"
     DEPOSIT_HARD_DELETED = "deposit_hard_deleted", "Deposit Hard Deleted"
-    RET_TRANSFERRED = "ret_transferred", "Transferred To RET"
-    RET_TRANSFER_ROLLBACK = "ret_transfer_rollback", "RET Transfer Rollback"
 
 
 class LeadAuditEntity(models.TextChoices):

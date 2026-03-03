@@ -390,50 +390,6 @@ class LeadCommentSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "author", "author_username", "created_at", "updated_at"]
 
 
-class LeadCloseWonTransferSerializer(serializers.Serializer):
-    ret_manager = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
-    to_status = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.filter(is_active=True))
-    transfer_author = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.filter(is_active=True),
-        required=False,
-        allow_null=True,
-    )
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=True)
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
-    comment = serializers.CharField(required=False, allow_blank=True, max_length=5000)
-    force_status = serializers.BooleanField(required=False, default=False)
-
-    def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
-        request_role = getattr(request_user, "role", None)
-
-        to_status = attrs["to_status"]
-        if to_status.conversion_bucket != LeadStatus.ConversionBucket.WON:
-            raise serializers.ValidationError({"to_status": "to_status must belong to WON conversion bucket"})
-
-        transfer_author = attrs.get("transfer_author")
-        if transfer_author and transfer_author.role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
-            raise serializers.ValidationError({"transfer_author": "transfer_author must be MANAGER or TEAMLEADER"})
-        if request_role == UserRole.MANAGER and transfer_author and transfer_author.id != request_user.id:
-            raise serializers.ValidationError({"transfer_author": "Managers cannot override transfer_author"})
-        if request_role in {UserRole.TEAMLEADER, UserRole.ADMIN, UserRole.SUPERUSER} and transfer_author is None:
-            raise serializers.ValidationError({"transfer_author": "transfer_author is required"})
-
-        attrs["reason"] = (attrs.get("reason") or "").strip()
-        if "comment" in attrs:
-            attrs["comment"] = (attrs.get("comment") or "").strip()
-        return attrs
-
-
-class LeadRollbackRetTransferSerializer(serializers.Serializer):
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
-
-    def validate(self, attrs):
-        attrs["reason"] = (attrs.get("reason") or "").strip()
-        return attrs
-
-
 class LeadDepositSerializer(serializers.ModelSerializer):
     lead_full_name = serializers.CharField(source="lead.full_name", read_only=True)
     creator_username = serializers.CharField(source="creator.username", read_only=True)
