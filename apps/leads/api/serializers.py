@@ -362,8 +362,11 @@ class LeadDepositStatsQuerySerializer(serializers.Serializer):
     creator_role = serializers.ChoiceField(choices=UserRole.choices, required=False)
 
     def validate(self, attrs):
-        date_from = attrs.get("date_from")
-        date_to = attrs.get("date_to")
+        today = timezone.localdate()
+        date_from = attrs.get("date_from") or today.replace(month=1, day=1)
+        date_to = attrs.get("date_to") or today
+        attrs["date_from"] = date_from
+        attrs["date_to"] = date_to
         if date_from and date_to and date_from > date_to:
             raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
         return attrs
