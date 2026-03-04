@@ -1,5 +1,8 @@
+from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from django import forms
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
 
 try:
     from import_export.admin import ExportActionMixin, ImportExportModelAdmin
@@ -22,6 +25,7 @@ else:
 from .models import (
     LeadAuditLog,
     Lead,
+    LeadAttachment,
     LeadDeposit,
     LeadComment,
     LeadDuplicateAttempt,
@@ -113,6 +117,46 @@ if IMPORT_EXPORT_AVAILABLE:
             required=False,
             widget=forms.HiddenInput(),
         )
+
+
+class LeadAttachmentAdminForm(forms.ModelForm):
+    class Meta:
+        model = LeadAttachment
+        fields = "__all__"
+
+    def clean(self):
+        cleaned_data = super().clean()
+        uploaded_file = cleaned_data.get("file")
+        requested_kind = cleaned_data.get("kind")
+
+        if uploaded_file:
+            try:
+                resolved_kind, detected_mime = validate_uploaded_attachment(
+                    uploaded_file,
+                    requested_kind=requested_kind,
+                )
+            except AttachmentValidationError as exc:
+                self.add_error(exc.field, exc.message)
+                return cleaned_data
+            cleaned_data["kind"] = resolved_kind
+            self._detected_mime_type = detected_mime
+            self._detected_original_name = getattr(uploaded_file, "name", "") or ""
+            self._detected_size_bytes = getattr(uploaded_file, "size", 0) or 0
+        elif self.instance.pk and requested_kind and requested_kind != self.instance.kind:
+            self.add_error("kind", "Kind is derived from file and cannot be changed manually.")
+
+        return cleaned_data
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        if hasattr(self, "_detected_mime_type"):
+            instance.mime_type = self._detected_mime_type
+            instance.original_name = getattr(self, "_detected_original_name", instance.original_name)
+            instance.size_bytes = getattr(self, "_detected_size_bytes", instance.size_bytes)
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 class SoftDeleteAdminMixin:
@@ -279,6 +323,25 @@ class LeadCommentAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     ordering = ("-created_at",)
     readonly_fields = ("created_at", "updated_at", "deleted_at")
     actions = ("soft_delete_selected", "restore_selected")
+
+
+@admin.register(LeadAttachment)
+class LeadAttachmentAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
+    form = LeadAttachmentAdminForm
+    list_display = ("id", "lead", "kind", "original_name", "download_link", "uploaded_by", "created_at", "is_deleted")
+    list_filter = ("kind", "uploaded_by", "is_deleted")
+    search_fields = ("lead__id", "lead__phone", "lead__full_name", "original_name", "mime_type", "uploaded_by__username")
+    ordering = ("-created_at", "-id")
+    readonly_fields = ("download_link", "original_name", "mime_type", "size_bytes", "created_at", "updated_at", "deleted_at")
+    actions = ("soft_delete_selected", "restore_selected")
+
+    @admin.display(description="Download")
+    def download_link(self, obj):
+        if not obj or not obj.file:
+            return "-"
+        url = reverse("protected-media", kwargs={"file_path": obj.file.name})
+        label = obj.original_name or "download"
+        return format_html('<a href="{}">{}</a>', url, label)
 
 
 @admin.register(LeadDeposit)

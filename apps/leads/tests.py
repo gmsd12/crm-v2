@@ -1,17 +1,22 @@
 from datetime import datetime
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.utils import timezone
 
 from apps.iam.models import UserRole
+from apps.leads.attachment_validation import AttachmentValidationError
 from apps.leads.models import (
     Lead,
     LeadAuditEntity,
+    LeadAttachment,
     LeadComment,
     LeadDeposit,
     LeadDuplicateAttempt,
@@ -221,6 +226,121 @@ class LeadStatusCatalogApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(denied_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_admin_can_upload_multiple_attachments_to_lead(self):
+        admin = User.objects.create_user(username="admin_attachment_upload", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Attachment Upload", code="partner-attachment-upload")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, phone="+15550111", custom_fields={})
+
+        with TemporaryDirectory() as media_root:
+            with self.settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/"):
+                self._auth(admin)
+                with patch(
+                    "apps.leads.api.views.validate_uploaded_attachment",
+                    side_effect=[
+                        (LeadAttachment.Kind.AUDIO, "audio/mpeg"),
+                        (LeadAttachment.Kind.IMAGE, "image/jpeg"),
+                    ],
+                ):
+                    response = self.client.post(
+                        f"/api/v1/leads/records/{lead.id}/attachments/",
+                        {
+                            "files": [
+                                SimpleUploadedFile("call.mp3", b"audio-bytes", content_type="audio/mpeg"),
+                                SimpleUploadedFile("photo.jpg", b"image-bytes", content_type="image/jpeg"),
+                            ],
+                        },
+                        format="multipart",
+                    )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(len(response.data["items"]), 2)
+        kinds = {item["kind"] for item in response.data["items"]}
+        self.assertEqual(kinds, {LeadAttachment.Kind.AUDIO, LeadAttachment.Kind.IMAGE})
+        lead.refresh_from_db()
+        self.assertIsNotNone(lead.last_contacted_at)
+        self.assertEqual(LeadAttachment.objects.filter(lead=lead).count(), 2)
+        self.assertEqual(
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.ATTACHMENT_CREATED).count(),
+            2,
+        )
+
+    def test_manager_can_list_own_attachments_but_not_foreign(self):
+        manager = User.objects.create_user(username="manager_attachment_scope", password="pass12345", role=UserRole.MANAGER)
+        other_manager = User.objects.create_user(
+            username="manager_attachment_scope_other",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        partner = Partner.objects.create(name="Partner Attachment Scope", code="partner-attachment-scope")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        own_lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+15550112", custom_fields={})
+        foreign_lead = Lead.objects.create(partner=partner, manager=other_manager, status=status_new, phone="+15550113", custom_fields={})
+
+        with TemporaryDirectory() as media_root:
+            with self.settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/"):
+                own_attachment = LeadAttachment.objects.create(
+                    lead=own_lead,
+                    uploaded_by=manager,
+                    file=SimpleUploadedFile("own.mp3", b"audio-bytes", content_type="audio/mpeg"),
+                    kind=LeadAttachment.Kind.AUDIO,
+                    original_name="own.mp3",
+                    mime_type="audio/mpeg",
+                    size_bytes=11,
+                )
+                foreign_attachment = LeadAttachment.objects.create(
+                    lead=foreign_lead,
+                    uploaded_by=other_manager,
+                    file=SimpleUploadedFile("foreign.jpg", b"image-bytes", content_type="image/jpeg"),
+                    kind=LeadAttachment.Kind.IMAGE,
+                    original_name="foreign.jpg",
+                    mime_type="image/jpeg",
+                    size_bytes=11,
+                )
+                self._auth(manager)
+                list_response = self.client.get("/api/v1/leads/attachments/")
+                own_response = self.client.get(f"/api/v1/leads/attachments/{own_attachment.id}/")
+                expected_file_url = f"/media/{own_attachment.file.name}"
+                download_response = self.client.get(expected_file_url)
+                foreign_response = self.client.get(f"/api/v1/leads/attachments/{foreign_attachment.id}/")
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 1)
+        self.assertEqual(list_response.data["results"][0]["id"], own_attachment.id)
+        self.assertEqual(
+            list_response.data["results"][0]["file_url"],
+            f"http://testserver{expected_file_url}",
+        )
+        self.assertEqual(own_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(download_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_attachment_upload_rejects_non_audio_and_non_image_files(self):
+        admin = User.objects.create_user(username="admin_attachment_reject", password="pass12345", role=UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner Attachment Reject", code="partner-attachment-reject")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        lead = Lead.objects.create(partner=partner, status=status_new, phone="+15550114", custom_fields={})
+
+        with TemporaryDirectory() as media_root:
+            with self.settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/"):
+                self._auth(admin)
+                with patch(
+                    "apps.leads.api.views.validate_uploaded_attachment",
+                    side_effect=AttachmentValidationError("Only audio and image files are allowed"),
+                ):
+                    response = self.client.post(
+                        f"/api/v1/leads/records/{lead.id}/attachments/",
+                        {
+                            "file": SimpleUploadedFile("notes.pdf", b"pdf-bytes", content_type="application/pdf"),
+                        },
+                        format="multipart",
+                    )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertFalse(LeadAttachment.objects.filter(lead=lead).exists())
 
     def test_admin_can_create_and_soft_delete_status(self):
         admin = User.objects.create_user(username="admin_status_write", password="pass12345", role=UserRole.ADMIN)

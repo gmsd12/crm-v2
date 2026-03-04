@@ -3,29 +3,39 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+import mimetypes
 from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import TruncDate, TruncMonth
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
+from django.utils._os import safe_join
 from django_filters import rest_framework as django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from rest_framework import filters as drf_filters, serializers, status, viewsets
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.authentication import SessionAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from apps.iam.api.rbac_mixins import RBACActionMixin
 from apps.iam.api.rbac_permissions import RBACPermission
 from apps.iam.models import UserRole
 from apps.iam.rbac import Perm
+from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from apps.leads.models import (
     Lead,
     LeadAuditEntity,
+    LeadAttachment,
     LeadDeposit,
     LeadComment,
     LeadTag,
@@ -42,6 +52,8 @@ User = get_user_model()
 
 from .serializers import (
     BulkLeadAssignManagerSerializer,
+    LeadAttachmentSerializer,
+    LeadAttachmentWriteSerializer,
     LeadDepositCreateSerializer,
     LeadDepositSerializer,
     LeadTagSerializer,
@@ -61,6 +73,29 @@ from .serializers import (
     LeadStatusSerializer,
     LeadUnassignManagerSerializer,
 )
+
+
+def _protected_media_file_response(*, file_path: str, allow_deleted: bool = False):
+    queryset = LeadAttachment.all_objects if allow_deleted else LeadAttachment.objects
+    attachment = queryset.filter(file=file_path).only("id", "file", "mime_type").first()
+    if attachment is None or not attachment.file:
+        raise Http404("File not found")
+
+    try:
+        safe_join(str(settings.MEDIA_ROOT), file_path)
+    except Exception as exc:
+        raise Http404("Invalid file path") from exc
+
+    content_type, _encoding = mimetypes.guess_type(attachment.file.name)
+    content_type = attachment.mime_type or content_type or "application/octet-stream"
+    return FileResponse(attachment.file.open("rb"), content_type=content_type)
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication, JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def protected_media(request, file_path: str):
+    return _protected_media_file_response(file_path=file_path, allow_deleted=False)
 
 
 def _status_payload(status_obj: LeadStatus | None) -> dict | None:
@@ -177,6 +212,70 @@ def _deposit_payload(dep: LeadDeposit | None) -> dict | None:
     }
 
 
+def _attachment_payload(attachment: LeadAttachment | None) -> dict | None:
+    if not attachment:
+        return None
+    file_url = ""
+    if attachment.file:
+        try:
+            file_url = attachment.file.url
+        except Exception:
+            file_url = ""
+    return {
+        "id": str(attachment.id),
+        "lead_id": str(attachment.lead_id) if attachment.lead_id else None,
+        "uploaded_by_id": str(attachment.uploaded_by_id) if attachment.uploaded_by_id else None,
+        "file": attachment.file.name if attachment.file else "",
+        "file_url": file_url,
+        "kind": attachment.kind,
+        "original_name": attachment.original_name,
+        "mime_type": attachment.mime_type,
+        "size_bytes": attachment.size_bytes,
+        "is_deleted": bool(getattr(attachment, "is_deleted", False)),
+        "deleted_at": attachment.deleted_at.isoformat() if getattr(attachment, "deleted_at", None) else None,
+        "created_at": attachment.created_at.isoformat() if attachment.created_at else None,
+    }
+
+
+def _create_lead_attachment(
+    *,
+    actor_user,
+    lead: Lead,
+    uploaded_file,
+    requested_kind: str | None = None,
+    reason: str = "",
+) -> LeadAttachment:
+    try:
+        resolved_kind, mime_type = validate_uploaded_attachment(
+            uploaded_file,
+            requested_kind=requested_kind,
+        )
+    except AttachmentValidationError as exc:
+        raise serializers.ValidationError({exc.field: exc.message})
+
+    attachment = LeadAttachment.objects.create(
+        lead=lead,
+        uploaded_by=actor_user,
+        file=uploaded_file,
+        kind=resolved_kind,
+        original_name=getattr(uploaded_file, "name", "") or "",
+        mime_type=mime_type,
+        size_bytes=getattr(uploaded_file, "size", 0) or 0,
+    )
+    _touch_lead_last_contacted(lead, at=attachment.created_at)
+    _log_status_audit(
+        event_type=LeadAuditEvent.ATTACHMENT_CREATED,
+        actor_user=actor_user,
+        source=LeadAuditSource.API,
+        entity_type=LeadAuditEntity.LEAD_ATTACHMENT,
+        entity_id=str(attachment.id),
+        lead=lead,
+        reason=reason,
+        payload_after=_attachment_payload(attachment),
+    )
+    return attachment
+
+
 def _deposit_unique_conflict_error(dep_type: int):
     if dep_type == LeadDeposit.Type.FTD:
         return serializers.ValidationError({"type": "FTD already exists for this lead"})
@@ -188,6 +287,34 @@ def _deposit_unique_conflict_error(dep_type: int):
 def _lead_manager_role(lead: Lead) -> str | None:
     manager = getattr(lead, "manager", None)
     return getattr(manager, "role", None)
+
+
+def _user_can_view_lead(*, actor_user, lead: Lead) -> bool:
+    role = getattr(actor_user, "role", None)
+    if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+        return True
+    if role in {UserRole.MANAGER, UserRole.RET}:
+        return lead.manager_id == actor_user.id
+    if role == UserRole.TEAMLEADER:
+        lead_manager_role = _lead_manager_role(lead)
+        return (
+            lead.manager_id == actor_user.id
+            or lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}
+            or lead.manager_id is None
+        )
+    return False
+
+
+def _user_can_edit_lead(*, actor_user, lead: Lead) -> bool:
+    role = getattr(actor_user, "role", None)
+    if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+        return True
+    if role in {UserRole.MANAGER, UserRole.RET}:
+        return lead.manager_id == actor_user.id
+    if role == UserRole.TEAMLEADER:
+        lead_manager_role = _lead_manager_role(lead)
+        return lead.manager_id == actor_user.id or lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}
+    return False
 
 
 def _assert_deposit_create_allowed(*, actor_user, lead: Lead, manual_type: bool) -> None:
@@ -780,6 +907,10 @@ class RoleInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
     pass
 
 
+class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
+    pass
+
+
 class LeadRecordFilter(django_filters.FilterSet):
     id__in = IdInFilter(field_name="id", lookup_expr="in")
     partner__in = IdInFilter(field_name="partner_id", lookup_expr="in")
@@ -987,6 +1118,179 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
             payload_after=_comment_payload(comment),
         )
         return Response(status=status.HTTP_200_OK)
+
+
+class LeadAttachmentFilter(django_filters.FilterSet):
+    id__in = IdInFilter(field_name="id", lookup_expr="in")
+    lead__in = IdInFilter(field_name="lead_id", lookup_expr="in")
+    uploaded_by__in = NumberInFilter(field_name="uploaded_by_id", lookup_expr="in")
+    kind__in = CharInFilter(field_name="kind", lookup_expr="in")
+
+    class Meta:
+        model = LeadAttachment
+        fields = [
+            "id",
+            "id__in",
+            "lead",
+            "lead__in",
+            "uploaded_by",
+            "uploaded_by__in",
+            "kind",
+            "kind__in",
+            "created_at",
+        ]
+
+
+class LeadAttachmentViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    queryset = LeadAttachment.objects.select_related("lead", "uploaded_by", "lead__manager").all().order_by("-created_at", "-id")
+    permission_classes = [IsAuthenticated, RBACPermission]
+    http_method_names = ["get", "post", "delete", "head", "options"]
+    filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filterset_class = LeadAttachmentFilter
+    search_fields = [
+        "original_name",
+        "mime_type",
+        "lead__full_name",
+        "lead__phone",
+        "lead__email",
+    ]
+    ordering = ["-created_at", "-id"]
+    ordering_fields = [
+        "id",
+        "lead__id",
+        "lead__full_name",
+        "uploaded_by__username",
+        "kind",
+        "original_name",
+        "size_bytes",
+        "created_at",
+        "updated_at",
+    ]
+    action_perms = {
+        "list": (Perm.LEADS_READ,),
+        "retrieve": (Perm.LEADS_READ,),
+        "create": (Perm.LEADS_WRITE,),
+        "soft_delete": (Perm.LEADS_WRITE,),
+        "restore": (Perm.LEADS_WRITE,),
+        "destroy": (Perm.LEADS_HARD_DELETE,),
+    }
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.MANAGER, UserRole.RET}:
+            return queryset.filter(lead__manager_id=self.request.user.id)
+        if role == UserRole.TEAMLEADER:
+            return queryset.filter(
+                Q(lead__manager_id=self.request.user.id)
+                | Q(lead__manager__role=UserRole.MANAGER)
+                | Q(lead__manager__role=UserRole.TEAMLEADER)
+                | Q(lead__manager__isnull=True)
+            )
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return LeadAttachmentWriteSerializer
+        return LeadAttachmentSerializer
+
+    def _assert_write_allowed(self, lead: Lead):
+        if not _user_can_edit_lead(actor_user=self.request.user, lead=lead):
+            raise PermissionDenied("You do not have permission to modify attachments for this lead")
+
+    def _extract_uploaded_files(self, request):
+        files = request.FILES.getlist("files")
+        if not files:
+            single = request.FILES.get("file")
+            if single is not None:
+                files = [single]
+        if not files:
+            raise serializers.ValidationError({"files": "Provide at least one file"})
+        return files
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lead = serializer.validated_data.get("lead")
+        if lead is None:
+            raise serializers.ValidationError({"lead": "This field is required"})
+        self._assert_write_allowed(lead)
+        files = self._extract_uploaded_files(request)
+        reason = serializer.validated_data.get("reason", "")
+        requested_kind = serializer.validated_data.get("kind")
+        items = [
+            _create_lead_attachment(
+                actor_user=request.user,
+                lead=lead,
+                uploaded_file=uploaded_file,
+                requested_kind=requested_kind,
+                reason=reason,
+            )
+            for uploaded_file in files
+        ]
+        return Response(
+            {
+                "count": len(items),
+                "items": LeadAttachmentSerializer(items, many=True, context=self.get_serializer_context()).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"])
+    def soft_delete(self, request, pk=None):
+        attachment = self.get_object()
+        self._assert_write_allowed(attachment.lead)
+        before = _attachment_payload(attachment)
+        attachment.delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.ATTACHMENT_SOFT_DELETED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_ATTACHMENT,
+            entity_id=str(attachment.id),
+            lead=attachment.lead,
+            payload_before=before,
+            payload_after=_attachment_payload(attachment),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        attachment = get_object_or_404(
+            LeadAttachment.all_objects.select_related("lead", "uploaded_by", "lead__manager"),
+            id=pk,
+        )
+        self._assert_write_allowed(attachment.lead)
+        before = _attachment_payload(attachment)
+        attachment.restore()
+        _log_status_audit(
+            event_type=LeadAuditEvent.ATTACHMENT_RESTORED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_ATTACHMENT,
+            entity_id=str(attachment.id),
+            lead=attachment.lead,
+            payload_before=before,
+            payload_after=_attachment_payload(attachment),
+        )
+        return Response(LeadAttachmentSerializer(attachment, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+
+    def destroy(self, request, *args, **kwargs):
+        attachment = self.get_object()
+        self._assert_write_allowed(attachment.lead)
+        before = _attachment_payload(attachment)
+        attachment.hard_delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.ATTACHMENT_HARD_DELETED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_ATTACHMENT,
+            entity_id=str(attachment.id),
+            lead=attachment.lead,
+            payload_before=before,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class LeadDepositFilter(django_filters.FilterSet):
@@ -1438,6 +1742,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "change_status": (Perm.LEADS_STATUS_WRITE,),
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
         "deposits": (Perm.LEADS_WRITE,),
+        "attachments": (Perm.LEADS_WRITE,),
         "set_tags": (Perm.LEADS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
@@ -1465,6 +1770,13 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "status__code",
         "source__code",
     ]
+
+    def get_required_perms(self) -> tuple[str, ...]:
+        if self.action in {"deposits", "attachments"}:
+            if self.request.method.upper() == "GET":
+                return (Perm.LEADS_READ,)
+            return (Perm.LEADS_WRITE,)
+        return super().get_required_perms()
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1619,6 +1931,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             dep_type_label = self._timeline_deposit_type_label(dep_type) or dep_type
             if dep_amount is not None and dep_type_label is not None:
                 return f"{dep_type_label}: {dep_amount}"
+
+        if audit.event_type in {
+            LeadAuditEvent.ATTACHMENT_CREATED,
+            LeadAuditEvent.ATTACHMENT_SOFT_DELETED,
+            LeadAuditEvent.ATTACHMENT_RESTORED,
+            LeadAuditEvent.ATTACHMENT_HARD_DELETED,
+        }:
+            attachment_payload = payload_after or payload_before
+            original_name = attachment_payload.get("original_name")
+            if isinstance(original_name, str) and original_name:
+                return original_name
 
         if audit.event_type in {
             LeadAuditEvent.COMMENT_CREATED,
@@ -1968,6 +2291,52 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             reason=serializer.validated_data.get("reason", ""),
         )
         return Response(LeadDepositSerializer(dep).data, status=status.HTTP_201_CREATED)
+
+    @action(
+        detail=True,
+        methods=["get", "post"],
+        url_path="attachments",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def attachments(self, request, pk=None):
+        lead = self.get_object()
+        if request.method.upper() == "GET":
+            items = LeadAttachment.objects.filter(lead=lead).select_related("uploaded_by").order_by("-created_at", "-id")
+            return Response(
+                LeadAttachmentSerializer(items, many=True, context=self.get_serializer_context()).data,
+                status=status.HTTP_200_OK,
+            )
+
+        self._assert_can_edit(lead)
+        serializer = LeadAttachmentWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        files = request.FILES.getlist("files")
+        if not files:
+            single = request.FILES.get("file")
+            if single is not None:
+                files = [single]
+        if not files:
+            raise serializers.ValidationError({"files": "Provide at least one file"})
+
+        reason = serializer.validated_data.get("reason", "")
+        requested_kind = serializer.validated_data.get("kind")
+        items = [
+            _create_lead_attachment(
+                actor_user=request.user,
+                lead=lead,
+                uploaded_file=uploaded_file,
+                requested_kind=requested_kind,
+                reason=reason,
+            )
+            for uploaded_file in files
+        ]
+        return Response(
+            {
+                "count": len(items),
+                "items": LeadAttachmentSerializer(items, many=True, context=self.get_serializer_context()).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["post"], url_path="set-tags")
     def set_tags(self, request, pk=None):

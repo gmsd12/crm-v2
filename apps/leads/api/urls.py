@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    LeadAttachmentViewSet,
     LeadCommentViewSet,
     LeadDepositViewSet,
     LeadViewSet,
@@ -15,6 +16,7 @@ router.register(r"leads/tags", LeadTagViewSet, basename="lead-tags")
 router.register(r"leads/statuses", LeadStatusViewSet, basename="lead-statuses")
 router.register(r"leads/audit-logs", LeadAuditLogViewSet, basename="lead-audit-logs")
 router.register(r"leads/comments", LeadCommentViewSet, basename="lead-comments")
+router.register(r"leads/attachments", LeadAttachmentViewSet, basename="lead-attachments")
 router.register(r"leads/deposits", LeadDepositViewSet, basename="lead-deposits")
 router.register(r"leads/records", LeadViewSet, basename="leads-records")
 

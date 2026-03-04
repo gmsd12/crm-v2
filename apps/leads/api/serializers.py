@@ -7,11 +7,13 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.reverse import reverse as drf_reverse
 
 from apps.iam.models import UserRole
 from apps.leads.models import (
     LeadAuditLog,
     Lead,
+    LeadAttachment,
     LeadComment,
     LeadDeposit,
     LeadTag,
@@ -450,6 +452,59 @@ class LeadCommentSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "author", "author_username", "created_at", "updated_at"]
+
+
+class LeadAttachmentSerializer(serializers.ModelSerializer):
+    lead_full_name = serializers.CharField(source="lead.full_name", read_only=True)
+    uploaded_by_username = serializers.CharField(source="uploaded_by.username", read_only=True)
+    uploaded_by_first_name = serializers.CharField(source="uploaded_by.first_name", read_only=True)
+    uploaded_by_last_name = serializers.CharField(source="uploaded_by.last_name", read_only=True)
+    uploaded_by_role = serializers.CharField(source="uploaded_by.role", read_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LeadAttachment
+        fields = [
+            "id",
+            "lead",
+            "lead_full_name",
+            "uploaded_by",
+            "uploaded_by_username",
+            "uploaded_by_first_name",
+            "uploaded_by_last_name",
+            "uploaded_by_role",
+            "file",
+            "file_url",
+            "kind",
+            "original_name",
+            "mime_type",
+            "size_bytes",
+            "is_deleted",
+            "deleted_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return ""
+        request = self.context.get("request")
+        return drf_reverse(
+            "protected-media",
+            kwargs={"file_path": obj.file.name},
+            request=request,
+        )
+
+
+class LeadAttachmentWriteSerializer(serializers.Serializer):
+    lead = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all(), required=False)
+    kind = serializers.ChoiceField(choices=LeadAttachment.Kind.choices, required=False)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        return attrs
 
 
 class LeadDepositSerializer(serializers.ModelSerializer):

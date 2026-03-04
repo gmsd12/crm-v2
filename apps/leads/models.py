@@ -10,6 +10,11 @@ from apps.core.models import BaseModel
 from apps.partners.models import Partner, PartnerSource
 
 
+def lead_attachment_upload_to(instance, filename: str) -> str:
+    lead_id = instance.lead_id or "unassigned"
+    return f"lead_attachments/lead_{lead_id}/{filename}"
+
+
 class LeadTag(BaseModel):
     name = models.CharField(max_length=128)
     color = models.CharField(max_length=32, blank=True, default="")
@@ -219,6 +224,46 @@ class LeadComment(BaseModel):
         return f"LeadComment {self.pk} lead={self.lead_id}"
 
 
+class LeadAttachment(BaseModel):
+    class Kind(models.TextChoices):
+        AUDIO = "audio", "Audio"
+        IMAGE = "image", "Image"
+
+    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="attachments")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="lead_attachments",
+    )
+    file = models.FileField(upload_to=lead_attachment_upload_to)
+    kind = models.CharField(max_length=16, choices=Kind.choices, default=Kind.IMAGE, db_index=True)
+    original_name = models.CharField(max_length=255, blank=True, default="")
+    mime_type = models.CharField(max_length=255, blank=True, default="")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+
+    class Meta:
+        db_table = "lead_attachments"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(fields=["lead", "created_at"]),
+            models.Index(fields=["uploaded_by", "created_at"]),
+            models.Index(fields=["kind", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"LeadAttachment {self.pk} lead={self.lead_id}"
+
+    def hard_delete(self, using=None, keep_parents=False):
+        storage = self.file.storage if self.file else None
+        file_name = self.file.name if self.file else None
+        result = super().hard_delete(using=using, keep_parents=keep_parents)
+        if storage and file_name and storage.exists(file_name):
+            storage.delete(file_name)
+        return result
+
+
 class LeadDuplicateAttempt(models.Model):
     id = models.BigAutoField(primary_key=True)
     partner = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name="lead_duplicate_attempts")
@@ -267,6 +312,10 @@ class LeadAuditEvent(models.TextChoices):
     COMMENT_RESTORED = "comment_restored", "Comment Restored"
     COMMENT_PINNED = "comment_pinned", "Comment Pinned"
     COMMENT_UNPINNED = "comment_unpinned", "Comment Unpinned"
+    ATTACHMENT_CREATED = "attachment_created", "Attachment Created"
+    ATTACHMENT_SOFT_DELETED = "attachment_soft_deleted", "Attachment Soft Deleted"
+    ATTACHMENT_RESTORED = "attachment_restored", "Attachment Restored"
+    ATTACHMENT_HARD_DELETED = "attachment_hard_deleted", "Attachment Hard Deleted"
     DUPLICATE_REJECTED = "duplicate_rejected", "Duplicate Rejected"
     DEPOSIT_CREATED = "deposit_created", "Deposit Created"
     DEPOSIT_UPDATED = "deposit_updated", "Deposit Updated"
@@ -280,6 +329,7 @@ class LeadAuditEntity(models.TextChoices):
     LEAD_TAG = "lead_tag", "Lead Tag"
     LEAD_STATUS = "lead_status", "Lead Status"
     LEAD_COMMENT = "lead_comment", "Lead Comment"
+    LEAD_ATTACHMENT = "lead_attachment", "Lead Attachment"
     LEAD_DEPOSIT = "lead_deposit", "Lead Deposit"
     DUPLICATE_ATTEMPT = "duplicate_attempt", "Duplicate Attempt"
 

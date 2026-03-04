@@ -15,10 +15,14 @@ venv/
 .env.*
 !.env.example
 *.sqlite3
+media/
 
 # IDE / OS
 .idea/
 .DS_Store
+
+# Local notes
+docs/tasks.txt
 
 # Coverage
 coverage/

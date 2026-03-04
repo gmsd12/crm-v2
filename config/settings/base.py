@@ -128,6 +128,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 PARTNER_API_THROTTLE_RATE = env("PARTNER_API_THROTTLE_RATE", default="120/min")
 PARTNER_LEADS_PAGE_SIZE = env.int("PARTNER_LEADS_PAGE_SIZE", default=50)
