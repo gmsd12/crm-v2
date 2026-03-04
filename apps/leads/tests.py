@@ -227,6 +227,133 @@ class LeadStatusCatalogApiTests(APITestCase):
         )
         self.assertEqual(denied_resp.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_admin_can_bulk_add_remove_and_clear_tags_with_noop_skips(self):
+        admin = User.objects.create_user(username="admin_bulk_tags", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_bulk_tags", password="pass12345", role=UserRole.MANAGER)
+        manager_2 = User.objects.create_user(username="manager_bulk_tags_2", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Bulk Tags", code="partner-bulk-tags")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        tag_good = LeadTag.objects.create(name="Good Bulk", color="green", icon="thumb")
+        tag_hot = LeadTag.objects.create(name="Hot Bulk", color="red", icon="fire")
+        tag_calm = LeadTag.objects.create(name="Calm Bulk", color="blue", icon="wave")
+
+        lead_a = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+15550121", custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, manager=manager_2, status=status_new, phone="+15550122", custom_fields={})
+        lead_a.tags.set([tag_good])
+        lead_b.tags.set([tag_good, tag_hot])
+
+        self._auth(admin)
+        add_resp = self.client.post(
+            "/api/v1/leads/records/bulk-add-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "tag_ids": [tag_hot.id, tag_calm.id],
+                "reason": "bulk add tags",
+            },
+            format="json",
+        )
+        self.assertEqual(add_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(add_resp.data["changed_count"], 2)
+        self.assertEqual(add_resp.data["unchanged_count"], 0)
+        lead_a.refresh_from_db()
+        lead_b.refresh_from_db()
+        self.assertCountEqual(list(lead_a.tags.values_list("id", flat=True)), [tag_good.id, tag_hot.id, tag_calm.id])
+        self.assertCountEqual(list(lead_b.tags.values_list("id", flat=True)), [tag_good.id, tag_hot.id, tag_calm.id])
+
+        add_noop_resp = self.client.post(
+            "/api/v1/leads/records/bulk-add-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "tag_ids": [tag_hot.id, tag_calm.id],
+                "reason": "bulk add tags noop",
+            },
+            format="json",
+        )
+        self.assertEqual(add_noop_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(add_noop_resp.data["changed_count"], 0)
+        self.assertEqual(add_noop_resp.data["unchanged_count"], 2)
+
+        remove_resp = self.client.post(
+            "/api/v1/leads/records/bulk-remove-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "tag_ids": [tag_hot.id, tag_calm.id],
+                "reason": "bulk remove tags",
+            },
+            format="json",
+        )
+        self.assertEqual(remove_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(remove_resp.data["changed_count"], 2)
+        self.assertEqual(remove_resp.data["unchanged_count"], 0)
+        lead_a.refresh_from_db()
+        lead_b.refresh_from_db()
+        self.assertCountEqual(list(lead_a.tags.values_list("id", flat=True)), [tag_good.id])
+        self.assertCountEqual(list(lead_b.tags.values_list("id", flat=True)), [tag_good.id])
+
+        remove_noop_resp = self.client.post(
+            "/api/v1/leads/records/bulk-remove-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "tag_ids": [tag_hot.id, tag_calm.id],
+                "reason": "bulk remove tags noop",
+            },
+            format="json",
+        )
+        self.assertEqual(remove_noop_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(remove_noop_resp.data["changed_count"], 0)
+        self.assertEqual(remove_noop_resp.data["unchanged_count"], 2)
+
+        clear_resp = self.client.post(
+            "/api/v1/leads/records/bulk-clear-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "reason": "bulk clear tags",
+            },
+            format="json",
+        )
+        self.assertEqual(clear_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(clear_resp.data["changed_count"], 2)
+        self.assertEqual(clear_resp.data["unchanged_count"], 0)
+        lead_a.refresh_from_db()
+        lead_b.refresh_from_db()
+        self.assertEqual(lead_a.tags.count(), 0)
+        self.assertEqual(lead_b.tags.count(), 0)
+
+        clear_noop_resp = self.client.post(
+            "/api/v1/leads/records/bulk-clear-tags/",
+            {
+                "lead_ids": [lead_a.id, lead_b.id],
+                "reason": "bulk clear noop",
+            },
+            format="json",
+        )
+        self.assertEqual(clear_noop_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(clear_noop_resp.data["changed_count"], 0)
+        self.assertEqual(clear_noop_resp.data["unchanged_count"], 2)
+        self.assertEqual(
+            LeadAuditLog.objects.filter(lead__in=[lead_a, lead_b], event_type=LeadAuditEvent.LEAD_TAGS_CHANGED).count(),
+            6,
+        )
+
+    def test_manager_cannot_use_bulk_tag_actions(self):
+        admin = User.objects.create_user(username="admin_bulk_tags_denied", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_bulk_tags_denied", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Bulk Tags Denied", code="partner-bulk-tags-denied")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        tag_good = LeadTag.objects.create(name="Denied Good", color="green", icon="thumb")
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+15550123", custom_fields={})
+
+        self._auth(admin)
+        lead.tags.set([tag_good])
+
+        self._auth(manager)
+        response = self.client.post(
+            "/api/v1/leads/records/bulk-clear-tags/",
+            {"lead_ids": [lead.id]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_admin_can_upload_multiple_attachments_to_lead(self):
         admin = User.objects.create_user(username="admin_attachment_upload", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Attachment Upload", code="partner-attachment-upload")

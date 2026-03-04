@@ -436,6 +436,56 @@ class LeadSetTagsSerializer(serializers.Serializer):
         return attrs
 
 
+class _BulkLeadTagBaseSerializer(serializers.Serializer):
+    lead_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+    )
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    allow_partial = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        unique_ids = list(dict.fromkeys(attrs["lead_ids"]))
+        max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
+        if len(unique_ids) > max_ids:
+            raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        attrs["_lead_ids"] = unique_ids
+        return attrs
+
+
+class BulkLeadAddTagsSerializer(_BulkLeadTagBaseSerializer):
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=LeadTag.objects.all(),
+        many=True,
+        required=True,
+        allow_empty=False,
+    )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        attrs["tag_ids"] = list(dict.fromkeys(attrs["tag_ids"]))
+        return attrs
+
+
+class BulkLeadRemoveTagsSerializer(_BulkLeadTagBaseSerializer):
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=LeadTag.objects.all(),
+        many=True,
+        required=True,
+        allow_empty=False,
+    )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        attrs["tag_ids"] = list(dict.fromkeys(attrs["tag_ids"]))
+        return attrs
+
+
+class BulkLeadClearTagsSerializer(_BulkLeadTagBaseSerializer):
+    pass
+
+
 class LeadCommentSerializer(serializers.ModelSerializer):
     author_username = serializers.CharField(source="author.username", read_only=True)
 

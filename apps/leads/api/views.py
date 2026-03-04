@@ -51,7 +51,10 @@ from apps.partners.models import Partner
 User = get_user_model()
 
 from .serializers import (
+    BulkLeadAddTagsSerializer,
     BulkLeadAssignManagerSerializer,
+    BulkLeadClearTagsSerializer,
+    BulkLeadRemoveTagsSerializer,
     LeadAttachmentSerializer,
     LeadAttachmentWriteSerializer,
     LeadDepositCreateSerializer,
@@ -1744,6 +1747,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "deposits": (Perm.LEADS_WRITE,),
         "attachments": (Perm.LEADS_WRITE,),
         "set_tags": (Perm.LEADS_WRITE,),
+        "bulk_add_tags": (Perm.LEADS_WRITE,),
+        "bulk_remove_tags": (Perm.LEADS_WRITE,),
+        "bulk_clear_tags": (Perm.LEADS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_class = LeadRecordFilter
@@ -2378,6 +2384,121 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 )
 
         return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
+
+    def _bulk_update_tags(self, request, *, lead_ids: list[int], tags: list[LeadTag], reason: str, allow_partial: bool, mode: str):
+        batch_id = uuid.uuid4().hex
+        changed_ids: list[str] = []
+        unchanged_ids: list[str] = []
+        failed: dict[str, str] = {}
+
+        with transaction.atomic():
+            locked_leads = list(
+                Lead.objects.select_for_update()
+                .select_related("partner", "manager", "first_manager", "source", "status")
+                .prefetch_related("tags")
+                .filter(id__in=lead_ids)
+            )
+            leads_map = {lead.id: lead for lead in locked_leads}
+            missing = [str(lead_id) for lead_id in lead_ids if lead_id not in leads_map]
+            if missing:
+                if not allow_partial:
+                    raise serializers.ValidationError({"lead_ids": f"Unknown lead ids: {', '.join(missing)}"})
+                failed.update({lead_id: "Unknown lead id" for lead_id in missing})
+
+            for lead_id in lead_ids:
+                lead = leads_map.get(lead_id)
+                if lead is None:
+                    continue
+                self._assert_can_set_tags(lead)
+                before_tags = _lead_tags_payload(lead)
+                before_tag_ids = {tag["id"] for tag in before_tags}
+                if mode == "add":
+                    lead.tags.add(*tags)
+                elif mode == "remove":
+                    lead.tags.remove(*tags)
+                elif mode == "clear":
+                    lead.tags.clear()
+                else:
+                    raise ValueError(f"Unsupported bulk tag mode: {mode}")
+                after_tags = _lead_tags_payload(lead)
+                after_tag_ids = {tag["id"] for tag in after_tags}
+                if before_tag_ids == after_tag_ids:
+                    unchanged_ids.append(str(lead.id))
+                    continue
+                _log_status_audit(
+                    event_type=LeadAuditEvent.LEAD_TAGS_CHANGED,
+                    actor_user=request.user,
+                    source=LeadAuditSource.API,
+                    entity_type=LeadAuditEntity.LEAD,
+                    entity_id=str(lead.id),
+                    batch_id=batch_id,
+                    lead=lead,
+                    reason=reason,
+                    payload_before={"lead_id": str(lead.id), "tags": before_tags},
+                    payload_after={"lead_id": str(lead.id), "tags": after_tags},
+                )
+                changed_ids.append(str(lead.id))
+
+            refreshed_leads = list(
+                Lead.objects.filter(id__in=[*changed_ids, *unchanged_ids])
+                .select_related("partner", "manager", "first_manager", "source", "status")
+                .prefetch_related("tags")
+                .order_by("-received_at", "-id")
+            )
+
+        return Response(
+            {
+                "batch_id": batch_id,
+                "processed_count": len(refreshed_leads),
+                "changed_count": len(changed_ids),
+                "changed_ids": changed_ids,
+                "unchanged_count": len(unchanged_ids),
+                "unchanged_ids": unchanged_ids,
+                "failed_count": len(failed),
+                "failed": failed,
+                "results": LeadSerializer(refreshed_leads, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="bulk-add-tags")
+    def bulk_add_tags(self, request):
+        serializer = BulkLeadAddTagsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return self._bulk_update_tags(
+            request,
+            lead_ids=serializer.validated_data["_lead_ids"],
+            tags=serializer.validated_data["tag_ids"],
+            reason=serializer.validated_data.get("reason", ""),
+            allow_partial=serializer.validated_data.get("allow_partial", False),
+            mode="add",
+        )
+
+    @action(detail=False, methods=["post"], url_path="bulk-remove-tags")
+    def bulk_remove_tags(self, request):
+        serializer = BulkLeadRemoveTagsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return self._bulk_update_tags(
+            request,
+            lead_ids=serializer.validated_data["_lead_ids"],
+            tags=serializer.validated_data["tag_ids"],
+            reason=serializer.validated_data.get("reason", ""),
+            allow_partial=serializer.validated_data.get("allow_partial", False),
+            mode="remove",
+        )
+
+    @action(detail=False, methods=["post"], url_path="bulk-clear-tags")
+    def bulk_clear_tags(self, request):
+        serializer = BulkLeadClearTagsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return self._bulk_update_tags(
+            request,
+            lead_ids=serializer.validated_data["_lead_ids"],
+            tags=[],
+            reason=serializer.validated_data.get("reason", ""),
+            allow_partial=serializer.validated_data.get("allow_partial", False),
+            mode="clear",
+        )
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
