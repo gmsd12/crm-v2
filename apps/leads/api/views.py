@@ -28,6 +28,7 @@ from apps.leads.models import (
     LeadAuditEntity,
     LeadDeposit,
     LeadComment,
+    LeadTag,
     LeadStatus,
     LeadAuditEvent,
     LeadAuditLog,
@@ -43,6 +44,7 @@ from .serializers import (
     BulkLeadAssignManagerSerializer,
     LeadDepositCreateSerializer,
     LeadDepositSerializer,
+    LeadTagSerializer,
     LeadDepositWriteSerializer,
     BulkLeadUnassignManagerSerializer,
     BulkLeadStatusChangeSerializer,
@@ -50,6 +52,7 @@ from .serializers import (
     LeadChangeFirstManagerSerializer,
     LeadDepositStatsQuerySerializer,
     LeadFunnelMetricsQuerySerializer,
+    LeadSetTagsSerializer,
     LeadWriteSerializer,
     LeadCommentSerializer,
     LeadSerializer,
@@ -78,6 +81,31 @@ def _status_payload(status_obj: LeadStatus | None) -> dict | None:
         "created_at": status_obj.created_at.isoformat() if status_obj.created_at else None,
         "updated_at": status_obj.updated_at.isoformat() if status_obj.updated_at else None,
     }
+
+
+def _tag_payload(tag_obj: LeadTag | None) -> dict | None:
+    if not tag_obj:
+        return None
+    return {
+        "id": str(tag_obj.id),
+        "name": tag_obj.name,
+        "color": tag_obj.color,
+        "icon": tag_obj.icon,
+        "is_deleted": bool(getattr(tag_obj, "is_deleted", False)),
+        "deleted_at": tag_obj.deleted_at.isoformat() if getattr(tag_obj, "deleted_at", None) else None,
+        "created_at": tag_obj.created_at.isoformat() if tag_obj.created_at else None,
+        "updated_at": tag_obj.updated_at.isoformat() if tag_obj.updated_at else None,
+    }
+
+
+def _lead_tags_payload(lead: Lead | None) -> list[dict]:
+    if not lead:
+        return []
+    tags = (
+        lead.tags.filter(is_deleted=False)
+        .order_by("name", "id")
+    )
+    return [_tag_payload(tag) for tag in tags]
 
 
 def _manager_payload(manager_obj) -> dict | None:
@@ -593,6 +621,117 @@ class LeadStatusViewSet(BaseStatusCatalogViewSet):
         )
         return Response(status=status.HTTP_200_OK)
 
+
+class LeadTagViewSet(RBACActionMixin, viewsets.ModelViewSet):
+    queryset = LeadTag.objects.all().order_by("name", "id")
+    serializer_class = LeadTagSerializer
+    permission_classes = [IsAuthenticated, RBACPermission]
+    action_perms = {
+        "list": (Perm.LEADS_READ,),
+        "retrieve": (Perm.LEADS_READ,),
+        "create": (Perm.LEADS_WRITE,),
+        "update": (Perm.LEADS_WRITE,),
+        "partial_update": (Perm.LEADS_WRITE,),
+        "soft_delete": (Perm.LEADS_WRITE,),
+        "restore": (Perm.LEADS_WRITE,),
+        "destroy": (Perm.LEADS_HARD_DELETE,),
+    }
+    filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filterset_fields = ["is_deleted"]
+    search_fields = ["name"]
+    ordering = ["name", "id"]
+    ordering_fields = [
+        "id",
+        "name",
+        "created_at",
+        "updated_at",
+    ]
+
+    def _assert_write_allowed(self, *, hard_delete: bool = False):
+        role = getattr(self.request.user, "role", None)
+        if hard_delete:
+            if role != UserRole.SUPERUSER:
+                raise PermissionDenied("Only superusers can hard-delete tags")
+            return
+        if role not in {UserRole.TEAMLEADER, UserRole.ADMIN, UserRole.SUPERUSER}:
+            raise PermissionDenied("Only teamleaders, admins and superusers can manage tags")
+
+    def perform_create(self, serializer):
+        self._assert_write_allowed()
+        tag = serializer.save()
+        _log_status_audit(
+            event_type=LeadAuditEvent.TAG_CREATED,
+            actor_user=self.request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_TAG,
+            entity_id=str(tag.id),
+            payload_after=_tag_payload(tag),
+        )
+
+    def perform_update(self, serializer):
+        self._assert_write_allowed()
+        before = _tag_payload(serializer.instance)
+        tag = serializer.save()
+        _log_status_audit(
+            event_type=LeadAuditEvent.TAG_UPDATED,
+            actor_user=self.request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_TAG,
+            entity_id=str(tag.id),
+            payload_before=before,
+            payload_after=_tag_payload(tag),
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_write_allowed(hard_delete=True)
+        instance = get_object_or_404(LeadTag.all_objects.all(), id=kwargs.get("pk"))
+        before = _tag_payload(instance)
+        instance.hard_delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.TAG_HARD_DELETED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_TAG,
+            entity_id=str(instance.id),
+            payload_before=before,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def soft_delete(self, request, pk=None):
+        self._assert_write_allowed()
+        instance = self.get_object()
+        before = _tag_payload(instance)
+        instance.delete()
+        _log_status_audit(
+            event_type=LeadAuditEvent.TAG_SOFT_DELETED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_TAG,
+            entity_id=str(instance.id),
+            payload_before=before,
+            payload_after=_tag_payload(instance),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        self._assert_write_allowed()
+        instance = get_object_or_404(LeadTag.all_objects.all(), id=pk)
+        before = _tag_payload(instance)
+        instance.restore()
+        _log_status_audit(
+            event_type=LeadAuditEvent.TAG_RESTORED,
+            actor_user=request.user,
+            source=LeadAuditSource.API,
+            entity_type=LeadAuditEntity.LEAD_TAG,
+            entity_id=str(instance.id),
+            payload_before=before,
+            payload_after=_tag_payload(instance),
+        )
+        return Response(LeadTagSerializer(instance).data, status=status.HTTP_200_OK)
+
+
 class LeadAuditLogViewSet(RBACActionMixin, viewsets.ReadOnlyModelViewSet):
     queryset = LeadAuditLog.objects.select_related("lead", "from_status", "to_status", "actor_user").all().order_by(
         "-created_at"
@@ -653,6 +792,8 @@ class LeadRecordFilter(django_filters.FilterSet):
     source__in = IdInFilter(field_name="source_id", lookup_expr="in")
     status_code = django_filters.CharFilter(field_name="status__code", lookup_expr="iexact")
     status__in = IdInFilter(field_name="status_id", lookup_expr="in")
+    tag = django_filters.NumberFilter(field_name="tags__id", distinct=True)
+    tags__in = IdInFilter(field_name="tags__id", lookup_expr="in", distinct=True)
     priority__in = NumberInFilter(field_name="priority", lookup_expr="in")
     age__in = NumberInFilter(field_name="age", lookup_expr="in")
     age_from = django_filters.NumberFilter(field_name="age", lookup_expr="gte")
@@ -693,6 +834,8 @@ class LeadRecordFilter(django_filters.FilterSet):
             "status",
             "status_code",
             "status__in",
+            "tag",
+            "tags__in",
             "geo",
             "phone",
             "phone__icontains",
@@ -1259,7 +1402,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "first_manager",
         "source",
         "status",
-    ).all().order_by("-received_at")
+    ).prefetch_related("tags").all().order_by("-received_at")
     serializer_class = LeadSerializer
     permission_classes = [IsAuthenticated, RBACPermission]
     manager_ret_protected_fields = {
@@ -1295,6 +1438,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "change_status": (Perm.LEADS_STATUS_WRITE,),
         "bulk_change_status": (Perm.LEADS_STATUS_WRITE,),
         "deposits": (Perm.LEADS_WRITE,),
+        "set_tags": (Perm.LEADS_WRITE,),
     }
     filter_backends = [DjangoFilterBackend, drf_filters.OrderingFilter]
     filterset_class = LeadRecordFilter
@@ -1485,6 +1629,25 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             body = payload_after.get("body") if isinstance(payload_after, dict) else None
             if isinstance(body, str) and body:
                 return body[:160]
+
+        if audit.event_type in {
+            LeadAuditEvent.TAG_CREATED,
+            LeadAuditEvent.TAG_UPDATED,
+            LeadAuditEvent.TAG_SOFT_DELETED,
+            LeadAuditEvent.TAG_RESTORED,
+            LeadAuditEvent.TAG_HARD_DELETED,
+        }:
+            tag_payload = payload_after or payload_before
+            tag_name = tag_payload.get("name")
+            if isinstance(tag_name, str) and tag_name:
+                return tag_name
+
+        if audit.event_type == LeadAuditEvent.LEAD_TAGS_CHANGED:
+            before_tags = payload_before.get("tags") if isinstance(payload_before.get("tags"), list) else []
+            after_tags = payload_after.get("tags") if isinstance(payload_after.get("tags"), list) else []
+            before_names = ", ".join(tag.get("name") for tag in before_tags if isinstance(tag, dict) and tag.get("name")) or "No tags"
+            after_names = ", ".join(tag.get("name") for tag in after_tags if isinstance(tag, dict) and tag.get("name")) or "No tags"
+            return f"{before_names} -> {after_names}"
 
         return (audit.reason or "").strip()
 
@@ -1681,6 +1844,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             "Only teamleaders (own/manager/teamleader leads), admins, and superusers can use force status change"
         )
 
+    def _assert_can_set_tags(self, lead: Lead):
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+            return
+        if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
+            return
+        raise PermissionDenied("Only teamleaders, admins and superusers can change lead tags")
+
     def create(self, request, *args, **kwargs):
         self._assert_can_create()
         self._assert_create_payload_allowed()
@@ -1797,6 +1968,47 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             reason=serializer.validated_data.get("reason", ""),
         )
         return Response(LeadDepositSerializer(dep).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="set-tags")
+    def set_tags(self, request, pk=None):
+        serializer = LeadSetTagsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get("reason", "")
+        tags = serializer.validated_data["tag_ids"]
+
+        with transaction.atomic():
+            lead = (
+                Lead.objects.select_for_update()
+                .select_related("partner", "manager", "first_manager", "source", "status")
+                .prefetch_related("tags")
+                .get(id=pk)
+            )
+            self._assert_can_set_tags(lead)
+            before_tags = _lead_tags_payload(lead)
+            before_tag_ids = {tag["id"] for tag in before_tags}
+            lead.tags.set(tags)
+            lead.refresh_from_db()
+            lead = (
+                Lead.objects.select_related("partner", "manager", "first_manager", "source", "status")
+                .prefetch_related("tags")
+                .get(id=lead.id)
+            )
+            after_tags = _lead_tags_payload(lead)
+            after_tag_ids = {tag["id"] for tag in after_tags}
+            if before_tag_ids != after_tag_ids:
+                _log_status_audit(
+                    event_type=LeadAuditEvent.LEAD_TAGS_CHANGED,
+                    actor_user=request.user,
+                    source=LeadAuditSource.API,
+                    entity_type=LeadAuditEntity.LEAD,
+                    entity_id=str(lead.id),
+                    lead=lead,
+                    reason=reason,
+                    payload_before={"lead_id": str(lead.id), "tags": before_tags},
+                    payload_after={"lead_id": str(lead.id), "tags": after_tags},
+                )
+
+        return Response(LeadSerializer(lead).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):

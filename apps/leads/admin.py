@@ -1,13 +1,118 @@
+from django import forms
 from django.contrib import admin
+
+try:
+    from import_export.admin import ExportActionMixin, ImportExportModelAdmin
+    from import_export.forms import ConfirmImportForm, ImportForm, SelectableFieldsExportForm
+    from import_export.formats import base_formats
+except ImportError:
+    class ExportActionMixin:
+        pass
+
+    class ImportExportModelAdmin(admin.ModelAdmin):
+        pass
+
+    base_formats = None
+    IMPORT_EXPORT_AVAILABLE = False
+else:
+    from .resources import LeadResource
+
+    IMPORT_EXPORT_AVAILABLE = True
+
 from .models import (
     LeadAuditLog,
     Lead,
     LeadDeposit,
     LeadComment,
     LeadDuplicateAttempt,
+    LeadTag,
     LeadStatus,
     LeadIdempotencyKey,
 )
+from apps.iam.models import User
+from apps.partners.models import PartnerSource, Partner
+
+if IMPORT_EXPORT_AVAILABLE:
+    class LeadExportForm(SelectableFieldsExportForm):
+        DEFAULT_EXPORT_FIELDS = [
+            "partner_name",
+            "source_name",
+            "status_name",
+            "geo",
+            "full_name",
+            "phone",
+            "email",
+            "received_at",
+            "comments",
+        ]
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if self.is_bound:
+                return
+
+            for resource in self.resources:
+                resource_name = resource.__name__.lower()
+                resource_fields = resource().get_export_order()
+                for field_name in resource_fields:
+                    boolean_name = f"{resource_name}_{field_name}"
+                    field = self.fields.get(boolean_name)
+                    if field is not None:
+                        field.initial = field_name in self.DEFAULT_EXPORT_FIELDS
+
+    class LeadImportForm(ImportForm):
+        partner = forms.ModelChoiceField(
+            queryset=Partner.objects.filter(is_deleted=False).order_by("name"),
+            required=False,
+            help_text="Optional fallback when partner_code is omitted in CSV.",
+        )
+        source = forms.ModelChoiceField(
+            queryset=PartnerSource.objects.filter(is_deleted=False).select_related("partner").order_by("partner__name", "name"),
+            required=False,
+            help_text="Optional fallback when source_code is omitted in CSV.",
+        )
+        status = forms.ModelChoiceField(
+            queryset=LeadStatus.objects.filter(is_deleted=False).order_by("order", "code"),
+            required=False,
+            help_text="Optional fallback when status_code is omitted in CSV.",
+        )
+        manager = forms.ModelChoiceField(
+            queryset=User.objects.filter(is_active=True).order_by("username"),
+            required=False,
+            help_text="Optional fallback when manager_username is omitted in CSV.",
+        )
+        first_manager = forms.ModelChoiceField(
+            queryset=User.objects.filter(is_active=True).order_by("username"),
+            required=False,
+            help_text="Optional fallback when first_manager_username is omitted in CSV.",
+        )
+
+    class LeadConfirmImportForm(ConfirmImportForm):
+        partner = forms.ModelChoiceField(
+            queryset=Partner.objects.filter(is_deleted=False).order_by("name"),
+            required=False,
+            widget=forms.HiddenInput(),
+        )
+        source = forms.ModelChoiceField(
+            queryset=PartnerSource.objects.filter(is_deleted=False),
+            required=False,
+            widget=forms.HiddenInput(),
+        )
+        status = forms.ModelChoiceField(
+            queryset=LeadStatus.objects.filter(is_deleted=False),
+            required=False,
+            widget=forms.HiddenInput(),
+        )
+        manager = forms.ModelChoiceField(
+            queryset=User.objects.filter(is_active=True),
+            required=False,
+            widget=forms.HiddenInput(),
+        )
+        first_manager = forms.ModelChoiceField(
+            queryset=User.objects.filter(is_active=True),
+            required=False,
+            widget=forms.HiddenInput(),
+        )
 
 
 class SoftDeleteAdminMixin:
@@ -75,8 +180,17 @@ class LeadStatusAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     actions = ("soft_delete_selected", "restore_selected")
 
 
+@admin.register(LeadTag)
+class LeadTagAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("name", "color", "icon", "is_deleted")
+    list_filter = ("is_deleted",)
+    search_fields = ("name", "icon")
+    ordering = ("name", "id")
+    actions = ("soft_delete_selected", "restore_selected")
+
+
 @admin.register(Lead)
-class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
+class LeadAdmin(SoftDeleteAdminMixin, ExportActionMixin, ImportExportModelAdmin):
     list_display = (
         "id",
         "partner",
@@ -112,6 +226,49 @@ class LeadAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     ordering = ("-received_at",)
     readonly_fields = ("received_at", "created_at", "updated_at", "deleted_at")
     actions = ("soft_delete_selected", "restore_selected")
+    resource_classes = [LeadResource] if IMPORT_EXPORT_AVAILABLE else []
+    export_form_class = LeadExportForm if IMPORT_EXPORT_AVAILABLE else None
+    import_form_class = LeadImportForm if IMPORT_EXPORT_AVAILABLE else None
+    confirm_form_class = LeadConfirmImportForm if IMPORT_EXPORT_AVAILABLE else None
+
+    def get_import_formats(self):
+        if not IMPORT_EXPORT_AVAILABLE:
+            return []
+        return [base_formats.CSV]
+
+    def get_export_formats(self):
+        if not IMPORT_EXPORT_AVAILABLE:
+            return []
+        formats = [base_formats.CSV, base_formats.JSON]
+        xlsx_format = getattr(base_formats, "XLSX", None)
+        if xlsx_format is not None:
+            formats.append(xlsx_format)
+        return formats
+
+    def get_confirm_form_initial(self, request, import_form):
+        initial = super().get_confirm_form_initial(request, import_form)
+        if not IMPORT_EXPORT_AVAILABLE or import_form is None:
+            return initial
+        for field_name in ("partner", "source", "status", "manager", "first_manager"):
+            value = import_form.cleaned_data.get(field_name)
+            if value is not None:
+                initial[field_name] = value.pk
+        return initial
+
+    def get_import_resource_kwargs(self, request, **kwargs):
+        resource_kwargs = super().get_import_resource_kwargs(request, **kwargs)
+        form = kwargs.get("form")
+        if form and hasattr(form, "cleaned_data"):
+            resource_kwargs.update(
+                {
+                    "default_partner": form.cleaned_data.get("partner"),
+                    "default_source": form.cleaned_data.get("source"),
+                    "default_status": form.cleaned_data.get("status"),
+                    "default_manager": form.cleaned_data.get("manager"),
+                    "default_first_manager": form.cleaned_data.get("first_manager"),
+                }
+            )
+        return resource_kwargs
 
 
 @admin.register(LeadComment)

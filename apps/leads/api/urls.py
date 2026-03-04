@@ -6,10 +6,12 @@ from .views import (
     LeadDepositViewSet,
     LeadViewSet,
     LeadAuditLogViewSet,
+    LeadTagViewSet,
     LeadStatusViewSet,
 )
 
 router = DefaultRouter()
+router.register(r"leads/tags", LeadTagViewSet, basename="lead-tags")
 router.register(r"leads/statuses", LeadStatusViewSet, basename="lead-statuses")
 router.register(r"leads/audit-logs", LeadAuditLogViewSet, basename="lead-audit-logs")
 router.register(r"leads/comments", LeadCommentViewSet, basename="lead-comments")

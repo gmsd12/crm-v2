@@ -9,6 +9,7 @@ https://docs.djangoproject.com/en/6.0/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
+import importlib.util
 from datetime import timedelta
 from pathlib import Path
 
@@ -55,6 +56,9 @@ INSTALLED_APPS = [
     "apps.core",
     "apps.iam",
 ]
+
+if importlib.util.find_spec("import_export"):
+    INSTALLED_APPS.append("import_export")
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

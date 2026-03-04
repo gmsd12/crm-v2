@@ -10,6 +10,28 @@ from apps.core.models import BaseModel
 from apps.partners.models import Partner, PartnerSource
 
 
+class LeadTag(BaseModel):
+    name = models.CharField(max_length=128)
+    color = models.CharField(max_length=32, blank=True, default="")
+    icon = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        db_table = "lead_tags"
+        indexes = [
+            models.Index(fields=["name"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name"],
+                condition=Q(is_deleted=False),
+                name="uniq_lead_tag_name_alive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class LeadStatus(BaseModel):
     class ConversionBucket(models.TextChoices):
         WON = "WON", "Won"
@@ -88,6 +110,7 @@ class Lead(BaseModel):
     )
     source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     status = models.ForeignKey("leads.LeadStatus", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
+    tags = models.ManyToManyField("leads.LeadTag", related_name="leads", blank=True)
 
     geo = models.CharField(max_length=2, blank=True, default="", db_index=True)
     full_name = models.CharField(max_length=255, blank=True, default="")
@@ -218,6 +241,12 @@ class LeadDuplicateAttempt(models.Model):
 
 
 class LeadAuditEvent(models.TextChoices):
+    TAG_CREATED = "tag_created", "Tag Created"
+    TAG_UPDATED = "tag_updated", "Tag Updated"
+    TAG_SOFT_DELETED = "tag_soft_deleted", "Tag Soft Deleted"
+    TAG_RESTORED = "tag_restored", "Tag Restored"
+    TAG_HARD_DELETED = "tag_hard_deleted", "Tag Hard Deleted"
+    LEAD_TAGS_CHANGED = "lead_tags_changed", "Lead Tags Changed"
     STATUS_CHANGED = "status_changed", "Status Changed"
     STATUS_CREATED = "status_created", "Status Created"
     STATUS_UPDATED = "status_updated", "Status Updated"
@@ -248,6 +277,7 @@ class LeadAuditEvent(models.TextChoices):
 
 class LeadAuditEntity(models.TextChoices):
     LEAD = "lead", "Lead"
+    LEAD_TAG = "lead_tag", "Lead Tag"
     LEAD_STATUS = "lead_status", "Lead Status"
     LEAD_COMMENT = "lead_comment", "Lead Comment"
     LEAD_DEPOSIT = "lead_deposit", "Lead Deposit"

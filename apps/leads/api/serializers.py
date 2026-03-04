@@ -14,6 +14,7 @@ from apps.leads.models import (
     Lead,
     LeadComment,
     LeadDeposit,
+    LeadTag,
     LeadStatus,
 )
 from apps.partners.models import Partner
@@ -36,6 +37,20 @@ class LeadStatusSerializer(serializers.ModelSerializer):
             "is_valid",
             "work_bucket",
             "conversion_bucket",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class LeadTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LeadTag
+        fields = [
+            "id",
+            "name",
+            "color",
+            "icon",
             "created_at",
             "updated_at",
         ]
@@ -77,6 +92,7 @@ class LeadSerializer(serializers.ModelSerializer):
     manager = serializers.SerializerMethodField()
     first_manager = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
+    tags = serializers.SerializerMethodField()
     last_comment = serializers.SerializerMethodField()
 
     class Meta:
@@ -90,6 +106,7 @@ class LeadSerializer(serializers.ModelSerializer):
             "first_manager",
             "source",
             "status",
+            "tags",
             "full_name",
             "phone",
             "email",
@@ -146,6 +163,24 @@ class LeadSerializer(serializers.ModelSerializer):
         if not obj.source_id:
             return None
         return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
+
+    def get_tags(self, obj):
+        tags = getattr(obj, "_prefetched_objects_cache", {}).get("tags")
+        if tags is None:
+            tags = obj.tags.filter(is_deleted=False).order_by("name", "id")
+        else:
+            tags = [tag for tag in tags if not getattr(tag, "is_deleted", False)]
+            tags.sort(key=lambda tag: ((tag.name or "").lower(), tag.id))
+
+        return [
+            {
+                "id": str(tag.id),
+                "name": tag.name,
+                "color": tag.color,
+                "icon": tag.icon,
+            }
+            for tag in tags
+        ]
 
     def get_last_comment(self, obj):
         comments_by_lead = self.context.get("last_comment_by_lead_id", {})
@@ -381,6 +416,21 @@ class LeadDepositStatsQuerySerializer(serializers.Serializer):
         attrs["date_to"] = date_to
         if date_from and date_to and date_from > date_to:
             raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
+        return attrs
+
+
+class LeadSetTagsSerializer(serializers.Serializer):
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=LeadTag.objects.all(),
+        many=True,
+        required=True,
+        allow_empty=True,
+    )
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        attrs["reason"] = (attrs.get("reason") or "").strip()
+        attrs["tag_ids"] = list(dict.fromkeys(attrs["tag_ids"]))
         return attrs
 
 

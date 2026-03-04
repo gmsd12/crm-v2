@@ -15,6 +15,7 @@ from apps.leads.models import (
     LeadComment,
     LeadDeposit,
     LeadDuplicateAttempt,
+    LeadTag,
     LeadStatus,
     LeadAuditEvent,
     LeadAuditLog,
@@ -101,6 +102,125 @@ class LeadStatusCatalogApiTests(APITestCase):
         ret_resp = self.client.get("/api/v1/leads/statuses/")
         self.assertEqual(ret_resp.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(ret_resp.data["results"]), 1)
+
+    def test_manager_and_ret_can_list_tags_but_cannot_create(self):
+        manager = User.objects.create_user(username="manager_tag_list", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_tag_list", password="pass12345", role=UserRole.RET)
+        LeadTag.objects.create(name="Warm", color="orange", icon="sun")
+
+        self._auth(manager)
+        manager_list = self.client.get("/api/v1/leads/tags/")
+        self.assertEqual(manager_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(manager_list.data["count"], 1)
+        manager_create = self.client.post(
+            "/api/v1/leads/tags/",
+            {"name": "Cold", "color": "blue", "icon": "snow"},
+            format="json",
+        )
+        self.assertEqual(manager_create.status_code, status.HTTP_403_FORBIDDEN)
+
+        self._auth(ret_user)
+        ret_list = self.client.get("/api/v1/leads/tags/")
+        self.assertEqual(ret_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(ret_list.data["count"], 1)
+
+    def test_teamleader_can_manage_tags_and_superuser_can_hard_delete(self):
+        teamleader = User.objects.create_user(username="tl_tag_manage", password="pass12345", role=UserRole.TEAMLEADER)
+        superuser = User.objects.create_user(
+            username="su_tag_manage",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        self._auth(teamleader)
+        create_resp = self.client.post(
+            "/api/v1/leads/tags/",
+            {"name": "Friendly", "color": "green", "icon": "heart"},
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        tag_id = create_resp.data["id"]
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                entity_type=LeadAuditEntity.LEAD_TAG,
+                entity_id=str(tag_id),
+                event_type=LeadAuditEvent.TAG_CREATED,
+            ).exists()
+        )
+
+        update_resp = self.client.patch(
+            f"/api/v1/leads/tags/{tag_id}/",
+            {"color": "emerald"},
+            format="json",
+        )
+        self.assertEqual(update_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_resp.data["color"], "emerald")
+
+        soft_delete_resp = self.client.post(
+            f"/api/v1/leads/tags/{tag_id}/soft_delete/",
+            {},
+            format="json",
+        )
+        self.assertEqual(soft_delete_resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(LeadTag.objects.filter(id=tag_id).exists())
+
+        restore_resp = self.client.post(
+            f"/api/v1/leads/tags/{tag_id}/restore/",
+            {},
+            format="json",
+        )
+        self.assertEqual(restore_resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(LeadTag.objects.filter(id=tag_id).exists())
+
+        self._auth(superuser)
+        delete_resp = self.client.delete(f"/api/v1/leads/tags/{tag_id}/")
+        self.assertEqual(delete_resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(LeadTag.all_objects.filter(id=tag_id).exists())
+
+    def test_admin_and_teamleader_can_set_lead_tags_but_manager_cannot(self):
+        admin = User.objects.create_user(username="admin_set_tags", password="pass12345", role=UserRole.ADMIN)
+        teamleader = User.objects.create_user(username="tl_set_tags", password="pass12345", role=UserRole.TEAMLEADER)
+        manager = User.objects.create_user(username="manager_set_tags", password="pass12345", role=UserRole.MANAGER)
+        manager_2 = User.objects.create_user(username="manager_set_tags_2", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Set Tags", code="partner-set-tags")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        tag_1 = LeadTag.objects.create(name="Good", color="lime", icon="thumb-up")
+        tag_2 = LeadTag.objects.create(name="Beautiful", color="pink", icon="star")
+        lead = Lead.objects.create(partner=partner, manager=manager, status=status_new, phone="+15550101", custom_fields={})
+
+        self._auth(admin)
+        admin_resp = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/set-tags/",
+            {"tag_ids": [tag_1.id, tag_2.id], "reason": "segment lead"},
+            format="json",
+        )
+        self.assertEqual(admin_resp.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertCountEqual(list(lead.tags.values_list("id", flat=True)), [tag_1.id, tag_2.id])
+        self.assertEqual([item["name"] for item in admin_resp.data["tags"]], ["Beautiful", "Good"])
+        self.assertTrue(
+            LeadAuditLog.objects.filter(lead=lead, event_type=LeadAuditEvent.LEAD_TAGS_CHANGED).exists()
+        )
+
+        self._auth(teamleader)
+        tl_resp = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/set-tags/",
+            {"tag_ids": [tag_2.id]},
+            format="json",
+        )
+        self.assertEqual(tl_resp.status_code, status.HTTP_200_OK)
+        lead.refresh_from_db()
+        self.assertCountEqual(list(lead.tags.values_list("id", flat=True)), [tag_2.id])
+
+        self._auth(manager_2)
+        denied_resp = self.client.post(
+            f"/api/v1/leads/records/{lead.id}/set-tags/",
+            {"tag_ids": [tag_1.id]},
+            format="json",
+        )
+        self.assertEqual(denied_resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_admin_can_create_and_soft_delete_status(self):
         admin = User.objects.create_user(username="admin_status_write", password="pass12345", role=UserRole.ADMIN)
@@ -4177,6 +4297,45 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         items = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
         self.assertCountEqual([item["id"] for item in items], [lead_a.id, lead_b.id])
+
+    def test_leads_list_supports_tag_and_tags_in_filters(self):
+        admin = User.objects.create_user(username="admin_leads_filter_tags", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="manager_filter_tags", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Partner Filter Tags", code="partner-filter-tags")
+        status_new = LeadStatus.objects.create(code="NEW", name="New", is_default_for_new_leads=True)
+        tag_good = LeadTag.objects.create(name="Good", color="green", icon="thumb")
+        tag_beautiful = LeadTag.objects.create(name="Beautiful", color="pink", icon="star")
+        tag_hot = LeadTag.objects.create(name="Hot", color="red", icon="fire")
+
+        lead_a = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
+        lead_b = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
+        lead_c = Lead.objects.create(partner=partner, manager=manager, status=status_new, custom_fields={})
+        lead_a.tags.set([tag_good, tag_beautiful])
+        lead_b.tags.set([tag_hot])
+        lead_c.tags.set([tag_beautiful])
+        self._auth(admin)
+
+        single_tag_response = self.client.get("/api/v1/leads/records/", {"tag": str(tag_good.id)})
+        self.assertEqual(single_tag_response.status_code, status.HTTP_200_OK)
+        single_items = (
+            single_tag_response.data["results"]
+            if isinstance(single_tag_response.data, dict) and "results" in single_tag_response.data
+            else single_tag_response.data
+        )
+        self.assertEqual([item["id"] for item in single_items], [lead_a.id])
+
+        multi_tag_response = self.client.get(
+            "/api/v1/leads/records/",
+            {"tags__in": f"{tag_good.id},{tag_hot.id}"},
+        )
+        self.assertEqual(multi_tag_response.status_code, status.HTTP_200_OK)
+        multi_items = (
+            multi_tag_response.data["results"]
+            if isinstance(multi_tag_response.data, dict) and "results" in multi_tag_response.data
+            else multi_tag_response.data
+        )
+        self.assertCountEqual([item["id"] for item in multi_items], [lead_a.id, lead_b.id])
+        self.assertEqual(len(multi_items), 2)
 
     def test_leads_list_supports_manager_role_filter(self):
         admin = User.objects.create_user(username="admin_leads_role_filter", password="pass12345", role=UserRole.ADMIN)
