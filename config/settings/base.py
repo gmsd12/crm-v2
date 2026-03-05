@@ -22,6 +22,16 @@ BASE_DIR = CONFIG_DIR.parent
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, []),
+    DJANGO_LANGUAGE_CODE=(str, "ru-ru"),
+    DJANGO_TIME_ZONE=(str, "Europe/Warsaw"),
+    DJANGO_USE_I18N=(bool, True),
+    DJANGO_USE_TZ=(bool, True),
+    DJANGO_SECURE_SSL_REDIRECT=(bool, False),
+    DJANGO_SESSION_COOKIE_SECURE=(bool, False),
+    DJANGO_CSRF_COOKIE_SECURE=(bool, False),
+    DJANGO_SECURE_PROXY_SSL_HEADER=(bool, False),
+    CORS_ALLOW_CREDENTIALS=(bool, True),
+    LOG_LEVEL=(str, "INFO"),
     PARTNER_API_THROTTLE_RATE=(str, "120/min"),
     PARTNER_LEADS_PAGE_SIZE=(int, 50),
     PARTNER_LEADS_MAX_PAGE_SIZE=(int, 200),
@@ -32,9 +42,24 @@ env = environ.Env(
     NOTIFICATIONS_PARTNER_DUPLICATE_THRESHOLD=(int, 10),
     NOTIFICATIONS_PARTNER_DUPLICATE_WINDOW_MINUTES=(int, 60),
     NOTIFICATIONS_BULK_SUMMARY_THRESHOLD=(int, 20),
+    JWT_ACCESS_TOKEN_LIFETIME_MINUTES=(int, 15),
+    JWT_REFRESH_TOKEN_LIFETIME_DAYS=(int, 30),
+    JWT_ROTATE_REFRESH_TOKENS=(bool, True),
+    JWT_BLACKLIST_AFTER_ROTATION=(bool, True),
+    JWT_UPDATE_LAST_LOGIN=(bool, True),
+    JWT_REFRESH_COOKIE_HTTPONLY=(bool, True),
+    API_TITLE=(str, "CRM V2 API"),
+    API_DESCRIPTION=(str, "API documentation for CRM V2"),
+    API_VERSION=(str, "0.1.0"),
     CELERY_BROKER_URL=(str, "redis://127.0.0.1:6379/0"),
     CELERY_RESULT_BACKEND=(str, "redis://127.0.0.1:6379/1"),
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
+    CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS=(float, 10.0),
+    CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT=(int, 500),
+    CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS=(float, 300.0),
+    CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT=(int, 500),
+    CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS=(float, 120.0),
+    CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT=(int, 500),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -101,10 +126,10 @@ ASGI_APPLICATION = "config.asgi.application"
 
 # Database
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": CONFIG_DIR / "db.sqlite3",
-    }
+    "default": env.db(
+        "DATABASE_URL",
+        default=f"sqlite:///{(CONFIG_DIR / 'db.sqlite3').as_posix()}",
+    )
 }
 
 # Password validation
@@ -126,10 +151,10 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = "ru-ru"
-TIME_ZONE = "Europe/Warsaw"
-USE_I18N = True
-USE_TZ = True
+LANGUAGE_CODE = env("DJANGO_LANGUAGE_CODE", default="ru-ru")
+TIME_ZONE = env("DJANGO_TIME_ZONE", default="Europe/Warsaw")
+USE_I18N = env.bool("DJANGO_USE_I18N", default=True)
+USE_TZ = env.bool("DJANGO_USE_TZ", default=True)
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
@@ -153,21 +178,30 @@ CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://127.0.0.1:
 CELERY_TASK_ALWAYS_EAGER = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)
 CELERY_TASK_EAGER_PROPAGATES = True
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS = env.float("CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS", default=10.0)
+CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT = env.int("CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT", default=500)
+CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS = env.float("CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS", default=300.0)
+CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT = env.int("CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT", default=500)
+CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS = env.float(
+    "CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS",
+    default=120.0,
+)
+CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT = env.int("CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT", default=500)
 CELERY_BEAT_SCHEDULE = {
     "notifications-process-due": {
         "task": "apps.core.tasks.process_due_notifications_task",
-        "schedule": 10.0,
-        "args": (500,),
+        "schedule": CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS,
+        "args": (CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT,),
     },
     "notifications-emit-overdue": {
         "task": "apps.core.tasks.emit_overdue_notifications_task",
-        "schedule": 300.0,
-        "args": (500,),
+        "schedule": CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS,
+        "args": (CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT,),
     },
     "notifications-manager-no-activity": {
         "task": "apps.core.tasks.emit_manager_no_activity_notifications_task",
-        "schedule": 120.0,
-        "args": (500,),
+        "schedule": CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS,
+        "args": (CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT,),
     },
 }
 
@@ -188,26 +222,28 @@ REST_FRAMEWORK = {
     },
 }
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
-    "UPDATE_LAST_LOGIN": True,
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env.int("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", default=15)),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("JWT_REFRESH_TOKEN_LIFETIME_DAYS", default=30)),
+    "ROTATE_REFRESH_TOKENS": env.bool("JWT_ROTATE_REFRESH_TOKENS", default=True),
+    "BLACKLIST_AFTER_ROTATION": env.bool("JWT_BLACKLIST_AFTER_ROTATION", default=True),
+    "UPDATE_LAST_LOGIN": env.bool("JWT_UPDATE_LAST_LOGIN", default=True),
 }
 JWT_REFRESH_COOKIE_NAME = env("JWT_REFRESH_COOKIE_NAME", default="refresh")
-JWT_REFRESH_COOKIE_DOMAIN = env("JWT_REFRESH_COOKIE_DOMAIN", default=None)  # "api.example.com"
+JWT_REFRESH_COOKIE_DOMAIN = env("JWT_REFRESH_COOKIE_DOMAIN", default="").strip() or None  # "api.example.com"
 JWT_REFRESH_COOKIE_SAMESITE = env("JWT_REFRESH_COOKIE_SAMESITE", default="Lax")  # Lax для subdomain OK
 JWT_REFRESH_COOKIE_SECURE = env.bool("JWT_REFRESH_COOKIE_SECURE", default=not DEBUG)
-JWT_REFRESH_COOKIE_HTTPONLY = True
+JWT_REFRESH_COOKIE_HTTPONLY = env.bool("JWT_REFRESH_COOKIE_HTTPONLY", default=True)
 JWT_REFRESH_COOKIE_PATH = env("JWT_REFRESH_COOKIE_PATH", default="/")
 
 # drf-spectacular
 SPECTACULAR_SETTINGS = {
-    "TITLE": "CRM V2 API",
-    "DESCRIPTION": "API documentation for CRM V2",
-    "VERSION": "0.1.0",
+    "TITLE": env("API_TITLE", default="CRM V2 API"),
+    "DESCRIPTION": env("API_DESCRIPTION", default="API documentation for CRM V2"),
+    "VERSION": env("API_VERSION", default="0.1.0"),
     # позже добавим SERVE_AUTHENTICATION / SECURITY и т.д.
 }
+
+LOG_LEVEL = env("LOG_LEVEL", default="INFO")
 
 LOGGING = {
     "version": 1,
@@ -237,25 +273,29 @@ LOGGING = {
         # твой проектный неймспейс
         "crm": {
             "handlers": ["console"],
-            "level": "INFO",
+            "level": LOG_LEVEL,
             "propagate": False,
         },
         # запросные логи
         "crm.request": {
             "handlers": ["console"],
-            "level": "INFO",
+            "level": LOG_LEVEL,
             "propagate": False,
         },
         # DRF и Django можно оставлять как есть или чуть подкрутить
         "django": {
             "handlers": ["console"],
-            "level": "INFO",
+            "level": LOG_LEVEL,
         },
     },
 }
 
 AUTH_USER_MODEL = "iam.User"
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_CREDENTIALS = env.bool("CORS_ALLOW_CREDENTIALS", default=True)
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+SECURE_SSL_REDIRECT = env.bool("DJANGO_SECURE_SSL_REDIRECT", default=False)
+SESSION_COOKIE_SECURE = env.bool("DJANGO_SESSION_COOKIE_SECURE", default=False)
+CSRF_COOKIE_SECURE = env.bool("DJANGO_CSRF_COOKIE_SECURE", default=False)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if env.bool("DJANGO_SECURE_PROXY_SSL_HEADER", default=False) else None

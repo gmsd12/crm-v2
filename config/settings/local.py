@@ -1,3 +1,3 @@
 from .base import *  # noqa
 
-DEBUG = True
+DEBUG = env.bool("DJANGO_DEBUG", default=True)
