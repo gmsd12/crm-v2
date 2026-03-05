@@ -28,7 +28,7 @@ def _origin_allowed(request) -> bool:
 
 def _ensure_origin_allowed(request) -> None:
     if not _origin_allowed(request):
-        raise PermissionDenied("Origin not allowed")
+        raise PermissionDenied("Источник запроса не разрешен")
 
 
 def _set_refresh_cookie(response: Response, refresh: str) -> None:
@@ -101,7 +101,7 @@ def refresh_view(request):
     cookie_name = settings.JWT_REFRESH_COOKIE_NAME
     raw_refresh = request.COOKIES.get(cookie_name)
     if not raw_refresh:
-        raise NotAuthenticated("Missing refresh cookie")
+        raise NotAuthenticated("Отсутствует refresh cookie")
 
     try:
         refresh = RefreshToken(raw_refresh)
@@ -117,7 +117,7 @@ def refresh_view(request):
         _set_refresh_cookie(resp, str(refresh))
         return resp
     except Exception:
-        raise AuthenticationFailed("Invalid refresh token")
+        raise AuthenticationFailed("Некорректный refresh token")
 
 
 @api_view(["POST"])

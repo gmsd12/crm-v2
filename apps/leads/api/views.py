@@ -31,6 +31,13 @@ from apps.iam.api.rbac_mixins import RBACActionMixin
 from apps.iam.api.rbac_permissions import RBACPermission
 from apps.iam.models import UserRole
 from apps.iam.rbac import Perm
+from apps.core.notifications import (
+    emit_comment_added_notification,
+    emit_deposit_created_notification,
+    emit_lead_assigned_notification,
+    emit_lead_status_changed_notification,
+    emit_lead_unassigned_notification,
+)
 from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from apps.leads.models import (
     Lead,
@@ -82,12 +89,12 @@ def _protected_media_file_response(*, file_path: str, allow_deleted: bool = Fals
     queryset = LeadAttachment.all_objects if allow_deleted else LeadAttachment.objects
     attachment = queryset.filter(file=file_path).only("id", "file", "mime_type").first()
     if attachment is None or not attachment.file:
-        raise Http404("File not found")
+        raise Http404("Файл не найден")
 
     try:
         safe_join(str(settings.MEDIA_ROOT), file_path)
     except Exception as exc:
-        raise Http404("Invalid file path") from exc
+        raise Http404("Некорректный путь к файлу") from exc
 
     content_type, _encoding = mimetypes.guess_type(attachment.file.name)
     content_type = attachment.mime_type or content_type or "application/octet-stream"
@@ -281,10 +288,10 @@ def _create_lead_attachment(
 
 def _deposit_unique_conflict_error(dep_type: int):
     if dep_type == LeadDeposit.Type.FTD:
-        return serializers.ValidationError({"type": "FTD already exists for this lead"})
+        return serializers.ValidationError({"type": "FTD уже существует для этого лида"})
     if dep_type == LeadDeposit.Type.RELOAD:
-        return serializers.ValidationError({"type": "Reload already exists for this lead"})
-    return serializers.ValidationError({"type": "Deposit type conflict for this lead"})
+        return serializers.ValidationError({"type": "Reload уже существует для этого лида"})
+    return serializers.ValidationError({"type": "Конфликт типа депозита для этого лида"})
 
 
 def _lead_manager_role(lead: Lead) -> str | None:
@@ -328,23 +335,23 @@ def _assert_deposit_create_allowed(*, actor_user, lead: Lead, manual_type: bool)
         return
     if role == UserRole.TEAMLEADER:
         if manual_type:
-            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+            raise PermissionDenied("Только админы и суперпользователи могут вручную выбирать тип депозита")
         if lead_manager_role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
-            raise PermissionDenied("Teamleaders can create deposits only for manager/teamleader leads")
+            raise PermissionDenied("Тимлиды могут создавать депозиты только для лидов менеджеров/тимлидов")
         return
     if role == UserRole.MANAGER:
         if manual_type:
-            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+            raise PermissionDenied("Только админы и суперпользователи могут вручную выбирать тип депозита")
         if lead.manager_id != actor_user.id:
-            raise PermissionDenied("Managers can create deposits only for own leads")
+            raise PermissionDenied("Менеджеры могут создавать депозиты только для своих лидов")
         return
     if role == UserRole.RET:
         if manual_type:
-            raise PermissionDenied("Only admins and superusers can choose deposit type manually")
+            raise PermissionDenied("Только админы и суперпользователи могут вручную выбирать тип депозита")
         if lead.manager_id != actor_user.id:
-            raise PermissionDenied("RET can create deposits only for own leads")
+            raise PermissionDenied("RET может создавать депозиты только для своих лидов")
         return
-    raise PermissionDenied("You cannot create deposits for this lead")
+    raise PermissionDenied("Вы не можете создавать депозиты для этого лида")
 
 
 def _create_lead_deposit(
@@ -365,11 +372,11 @@ def _create_lead_deposit(
         dep_type = _next_deposit_type(lead, actor_role=role)
 
     if role == UserRole.TEAMLEADER and dep_type != LeadDeposit.Type.FTD:
-        raise serializers.ValidationError({"type": "Teamleaders can create only FTD"})
+        raise serializers.ValidationError({"type": "Тимлиды могут создавать только FTD"})
     if role == UserRole.MANAGER and dep_type != LeadDeposit.Type.FTD:
-        raise serializers.ValidationError({"type": "Managers can create only FTD"})
+        raise serializers.ValidationError({"type": "Менеджеры могут создавать только FTD"})
     if role == UserRole.RET and dep_type == LeadDeposit.Type.FTD:
-        raise serializers.ValidationError({"type": "RET cannot create FTD"})
+        raise serializers.ValidationError({"type": "RET не может создавать FTD"})
 
     if dep_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
         if LeadDeposit.objects.filter(lead=lead, type=dep_type, is_deleted=False).exists():
@@ -396,6 +403,13 @@ def _create_lead_deposit(
         reason=reason,
         payload_after=_deposit_payload(dep),
     )
+    if int(dep.type) == int(LeadDeposit.Type.FTD):
+        transaction.on_commit(
+            lambda deposit_id=dep.id, actor_user_id=getattr(actor_user, "id", None): emit_deposit_created_notification(
+                deposit_id=deposit_id,
+                actor_user_id=actor_user_id,
+            )
+        )
     return dep
 
 
@@ -470,8 +484,8 @@ def _log_status_audit(
     to_status: LeadStatus | None = None,
     payload_before: dict | None = None,
     payload_after: dict | None = None,
-) -> None:
-    LeadAuditLog.objects.create(
+) -> LeadAuditLog:
+    return LeadAuditLog.objects.create(
         lead=lead,
         event_type=event_type,
         entity_type=entity_type,
@@ -489,11 +503,11 @@ def _log_status_audit(
 
 def _log_manager_audit(
     *, lead: Lead, actor_user, source: str, reason: str, from_manager, to_manager, batch_id: str = ""
-) -> None:
+) -> LeadAuditLog | None:
     from_id = getattr(from_manager, "id", None)
     to_id = getattr(to_manager, "id", None)
     if from_id == to_id:
-        return
+        return None
     if to_manager is None:
         event_type = LeadAuditEvent.MANAGER_UNASSIGNED
     elif from_manager is None:
@@ -501,7 +515,7 @@ def _log_manager_audit(
     else:
         event_type = LeadAuditEvent.MANAGER_REASSIGNED
 
-    _log_status_audit(
+    return _log_status_audit(
         event_type=event_type,
         actor_user=actor_user,
         source=source,
@@ -555,12 +569,12 @@ def _status_change_error_for_lead(
     to_status: LeadStatus,
 ) -> str | None:
     if to_status.id == lead.status_id:
-        return "Lead already has this status"
+        return "У лида уже этот статус"
     return None
 
 
 def _status_change_error_as_validation_error(error: str) -> serializers.ValidationError:
-    if error == "Lead already has this status":
+    if error == "У лида уже этот статус":
         return serializers.ValidationError({"to_status": error})
     return serializers.ValidationError(error)
 
@@ -575,7 +589,7 @@ def _get_idempotency_key(request) -> str | None:
     if not key:
         return None
     if len(key) > 128:
-        raise serializers.ValidationError({"idempotency_key": "Idempotency-Key must be 128 chars or less"})
+        raise serializers.ValidationError({"idempotency_key": "Idempotency-Key должен быть длиной не более 128 символов"})
     return key
 
 
@@ -593,10 +607,10 @@ def _acquire_idempotency_record(*, request, endpoint: str, payload_hash: str):
     if not created:
         if record.request_hash != payload_hash:
             raise serializers.ValidationError(
-                {"idempotency_key": "This Idempotency-Key was already used with a different payload"}
+                {"idempotency_key": "Этот Idempotency-Key уже использован с другим payload"}
             )
         if record.response_status == 0:
-            raise serializers.ValidationError({"idempotency_key": "Request with this Idempotency-Key is in progress"})
+            raise serializers.ValidationError({"idempotency_key": "Запрос с этим Idempotency-Key уже выполняется"})
         return record, Response(record.response_body, status=record.response_status)
     return record, None
 
@@ -611,7 +625,7 @@ def _save_idempotency_response(record, *, response_status: int, response_body):
 
 def _assert_status_not_used(status_obj: LeadStatus, *, action: str):
     if Lead.all_objects.filter(status_id=status_obj.id).exists():
-        raise serializers.ValidationError({"status": f"Cannot {action} status that is assigned to leads"})
+        raise serializers.ValidationError({"status": f"Нельзя {action} статус, который уже назначен лидам"})
 
 
 class BaseStatusCatalogViewSet(RBACActionMixin, viewsets.ModelViewSet):
@@ -781,10 +795,10 @@ class LeadTagViewSet(RBACActionMixin, viewsets.ModelViewSet):
         role = getattr(self.request.user, "role", None)
         if hard_delete:
             if role != UserRole.SUPERUSER:
-                raise PermissionDenied("Only superusers can hard-delete tags")
+                raise PermissionDenied("Только суперпользователь может удалять теги навсегда")
             return
         if role not in {UserRole.TEAMLEADER, UserRole.ADMIN, UserRole.SUPERUSER}:
-            raise PermissionDenied("Only teamleaders, admins and superusers can manage tags")
+            raise PermissionDenied("Только тимлиды, админы и суперпользователи могут управлять тегами")
 
     def perform_create(self, serializer):
         self._assert_write_allowed()
@@ -1052,7 +1066,7 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role in {UserRole.SUPERUSER, UserRole.ADMIN, UserRole.TEAMLEADER}:
             return
         if instance.author_id != self.request.user.id:
-            raise PermissionDenied("You can modify only your own comments")
+            raise PermissionDenied("Вы можете изменять только свои комментарии")
 
     def perform_create(self, serializer):
         comment = serializer.save(author=self.request.user)
@@ -1066,6 +1080,8 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
             lead=comment.lead,
             payload_after=_comment_payload(comment),
         )
+        comment_id = comment.id
+        transaction.on_commit(lambda comment_id=comment_id: emit_comment_added_notification(comment_id=comment_id))
 
     def perform_update(self, serializer):
         self._assert_write_allowed(serializer.instance)
@@ -1200,7 +1216,7 @@ class LeadAttachmentViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     def _assert_write_allowed(self, lead: Lead):
         if not _user_can_edit_lead(actor_user=self.request.user, lead=lead):
-            raise PermissionDenied("You do not have permission to modify attachments for this lead")
+            raise PermissionDenied("У вас нет прав на изменение вложений этого лида")
 
     def _extract_uploaded_files(self, request):
         files = request.FILES.getlist("files")
@@ -1209,7 +1225,7 @@ class LeadAttachmentViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if single is not None:
                 files = [single]
         if not files:
-            raise serializers.ValidationError({"files": "Provide at least one file"})
+            raise serializers.ValidationError({"files": "Передайте хотя бы один файл"})
         return files
 
     def create(self, request, *args, **kwargs):
@@ -1217,7 +1233,7 @@ class LeadAttachmentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         lead = serializer.validated_data.get("lead")
         if lead is None:
-            raise serializers.ValidationError({"lead": "This field is required"})
+            raise serializers.ValidationError({"lead": "Это поле обязательно"})
         self._assert_write_allowed(lead)
         files = self._extract_uploaded_files(request)
         reason = serializer.validated_data.get("reason", "")
@@ -1573,16 +1589,16 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def _assert_update_allowed(self, deposit: LeadDeposit):
         role = getattr(self.request.user, "role", None)
         if "lead" in self.request.data:
-            raise PermissionDenied("Lead cannot be changed for an existing deposit")
+            raise PermissionDenied("Нельзя изменить лид у существующего депозита")
         if role in {UserRole.MANAGER, UserRole.RET, UserRole.TEAMLEADER} and "type" in self.request.data:
-            raise PermissionDenied("Only admins and superusers can change deposit type")
+            raise PermissionDenied("Только админы и суперпользователи могут менять тип депозита")
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         lead = serializer.validated_data.get("lead")
         if lead is None:
-            raise serializers.ValidationError({"lead": "This field is required"})
+            raise serializers.ValidationError({"lead": "Это поле обязательно"})
         dep = _create_lead_deposit(
             actor_user=request.user,
             lead=lead,
@@ -1615,7 +1631,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
             update_fields.append("type")
 
         if len(update_fields) == 1:
-            raise serializers.ValidationError("No changes provided")
+            raise serializers.ValidationError("Нет изменений для сохранения")
 
         try:
             deposit.save(update_fields=sorted(set(update_fields)))
@@ -1670,7 +1686,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
         elif role == UserRole.TEAMLEADER:
             allowed = getattr(deposit.creator, "role", None) == UserRole.MANAGER
         if not allowed:
-            raise PermissionDenied("You do not have permission to restore this deposit")
+            raise PermissionDenied("У вас нет прав на восстановление этого депозита")
 
         before = _deposit_payload(deposit)
         deposit.restore()
@@ -1909,8 +1925,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         }:
             before_manager = payload_before.get("manager") if isinstance(payload_before.get("manager"), dict) else {}
             after_manager = payload_after.get("manager") if isinstance(payload_after.get("manager"), dict) else {}
-            before_name = before_manager.get("username") or "Unassigned"
-            after_name = after_manager.get("username") or "Unassigned"
+            before_name = before_manager.get("username") or "Не назначен"
+            after_name = after_manager.get("username") or "Не назначен"
             return f"{before_name} -> {after_name}"
 
         if audit.event_type == LeadAuditEvent.FIRST_MANAGER_CHANGED:
@@ -1920,8 +1936,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             after_manager = (
                 payload_after.get("first_manager") if isinstance(payload_after.get("first_manager"), dict) else {}
             )
-            before_name = before_manager.get("username") or "Unassigned"
-            after_name = after_manager.get("username") or "Unassigned"
+            before_name = before_manager.get("username") or "Не назначен"
+            after_name = after_manager.get("username") or "Не назначен"
             return f"{before_name} -> {after_name}"
 
         if audit.event_type in {
@@ -1974,8 +1990,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if audit.event_type == LeadAuditEvent.LEAD_TAGS_CHANGED:
             before_tags = payload_before.get("tags") if isinstance(payload_before.get("tags"), list) else []
             after_tags = payload_after.get("tags") if isinstance(payload_after.get("tags"), list) else []
-            before_names = ", ".join(tag.get("name") for tag in before_tags if isinstance(tag, dict) and tag.get("name")) or "No tags"
-            after_names = ", ".join(tag.get("name") for tag in after_tags if isinstance(tag, dict) and tag.get("name")) or "No tags"
+            before_names = ", ".join(tag.get("name") for tag in before_tags if isinstance(tag, dict) and tag.get("name")) or "Нет тегов"
+            after_names = ", ".join(tag.get("name") for tag in after_tags if isinstance(tag, dict) and tag.get("name")) or "Нет тегов"
             return f"{before_names} -> {after_names}"
 
         return (audit.reason or "").strip()
@@ -2015,7 +2031,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             unknown_events = sorted(set(requested_events) - known_events)
             if unknown_events:
                 raise serializers.ValidationError(
-                    {"events": f"Unknown event types: {', '.join(unknown_events)}"}
+                    {"events": f"Неизвестные типы событий: {', '.join(unknown_events)}"}
                 )
             queryset = queryset.filter(event_type__in=requested_events)
 
@@ -2027,19 +2043,19 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def _assert_can_create(self):
         role = getattr(self.request.user, "role", None)
         if role not in {UserRole.SUPERUSER, UserRole.ADMIN}:
-            raise PermissionDenied("Only admins and superusers can create leads")
+            raise PermissionDenied("Только админы и суперпользователи могут создавать лидов")
 
     def _assert_can_edit(self, lead: Lead):
         role = getattr(self.request.user, "role", None)
         if role in {UserRole.MANAGER, UserRole.RET} and lead.manager_id != self.request.user.id:
-            raise PermissionDenied("You can edit only your own leads")
+            raise PermissionDenied("Вы можете редактировать только своих лидов")
         if role == UserRole.TEAMLEADER:
             if lead.manager_id == self.request.user.id:
                 return
             lead_manager_role = getattr(getattr(lead, "manager", None), "role", None)
             if lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can edit only own leads and manager/teamleader leads")
+            raise PermissionDenied("Тимлиды могут редактировать только свои лиды и лиды менеджеров/тимлидов")
 
     def _assert_can_manage_assignment(self, lead: Lead, *, operation: str):
         role = getattr(self.request.user, "role", None)
@@ -2052,22 +2068,22 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if operation == "assign":
             if lead.manager_id is None or lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can assign only unassigned leads or manager/teamleader leads")
+            raise PermissionDenied("Тимлиды могут назначать только неназначенные лиды или лиды менеджеров/тимлидов")
 
         if operation == "unassign":
             if lead_manager_role in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                 return
-            raise PermissionDenied("Teamleaders can unassign only leads assigned to managers/teamleaders")
+            raise PermissionDenied("Тимлиды могут снимать назначение только с лидов менеджеров/тимлидов")
 
         if lead.manager_id is None:
             return
-        raise PermissionDenied("Unsupported assignment operation")
+        raise PermissionDenied("Неподдерживаемая операция назначения")
 
     def _assert_can_change_first_manager(self):
         role = getattr(self.request.user, "role", None)
         if role in {UserRole.SUPERUSER, UserRole.ADMIN, UserRole.TEAMLEADER}:
             return
-        raise PermissionDenied("Only teamleaders, admins and superusers can change first_manager")
+        raise PermissionDenied("Только тимлиды, админы и суперпользователи могут менять first_manager")
 
     def _assert_can_change_first_manager_for_lead(self, lead: Lead):
         role = getattr(self.request.user, "role", None)
@@ -2075,7 +2091,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             return
         if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
             return
-        raise PermissionDenied("Teamleaders can change first_manager only for manager/teamleader leads")
+        raise PermissionDenied("Тимлиды могут менять first_manager только у лидов менеджеров/тимлидов")
 
     def _assert_assign_first_manager_override_allowed(self, *, first_assigned_at_provided: bool):
         role = getattr(self.request.user, "role", None)
@@ -2083,9 +2099,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             return
         if role == UserRole.TEAMLEADER:
             if first_assigned_at_provided:
-                raise PermissionDenied("Teamleaders cannot set first_assigned_at manually during assign")
+                raise PermissionDenied("Тимлиды не могут вручную задавать first_assigned_at при назначении")
             return
-        raise PermissionDenied("Only teamleaders, admins and superusers can override first_manager during assign")
+        raise PermissionDenied("Только тимлиды, админы и суперпользователи могут переопределять first_manager при назначении")
 
     def _resolve_assign_first_assigned_at(self, *, requested_first_assigned_at):
         role = getattr(self.request.user, "role", None)
@@ -2101,14 +2117,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             forbidden_sensitive = sorted(payload_fields & self.superuser_only_update_fields)
             if forbidden_sensitive:
                 raise PermissionDenied(
-                    f"Only superusers can edit sensitive fields: {', '.join(forbidden_sensitive)}"
+                    f"Только суперпользователь может менять чувствительные поля: {', '.join(forbidden_sensitive)}"
                 )
 
         if role in {UserRole.MANAGER, UserRole.RET}:
             forbidden = sorted(payload_fields & self.manager_ret_protected_fields)
             if forbidden:
                 raise PermissionDenied(
-                    f"Managers and RET cannot edit protected fields: {', '.join(forbidden)}"
+                    f"Менеджеры и RET не могут менять защищенные поля: {', '.join(forbidden)}"
                 )
 
         if payload_fields & {"first_manager", "first_assigned_at"}:
@@ -2117,7 +2133,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         if "next_contact_at" in payload_fields:
             if role in {UserRole.MANAGER, UserRole.RET} and lead.manager_id != self.request.user.id:
-                raise PermissionDenied("You can set next_contact_at only for your own leads")
+                raise PermissionDenied("Вы можете ставить next_contact_at только своим лидам")
             if role == UserRole.TEAMLEADER:
                 if lead.manager_id == self.request.user.id:
                     return
@@ -2125,16 +2141,16 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 manager_role = getattr(manager, "role", None)
                 if manager is None or manager_role not in {UserRole.MANAGER, UserRole.TEAMLEADER}:
                     raise PermissionDenied(
-                        "Teamleaders can set next_contact_at only for own and manager/teamleader leads"
+                        "Тимлиды могут задавать next_contact_at только у своих лидов и лидов менеджеров/тимлидов"
                     )
 
     def _assert_create_payload_allowed(self):
         role = getattr(self.request.user, "role", None)
         payload_fields = set(self.request.data.keys())
         if role != UserRole.SUPERUSER and "geo" in payload_fields:
-            raise PermissionDenied("Only superusers can set geo on create")
+            raise PermissionDenied("Только суперпользователь может задавать geo при создании")
         if role != UserRole.SUPERUSER and "custom_fields" in payload_fields:
-            raise PermissionDenied("Only superusers can set custom_fields on create")
+            raise PermissionDenied("Только суперпользователь может задавать custom_fields при создании")
 
     def _assert_bulk_status_change_allowed(self, leads: list[Lead]):
         role = getattr(self.request.user, "role", None)
@@ -2143,7 +2159,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role in {UserRole.MANAGER, UserRole.RET}:
             foreign_ids = [str(lead.id) for lead in leads if lead.manager_id != self.request.user.id]
             if foreign_ids:
-                raise PermissionDenied("You can change status only for your own leads")
+                raise PermissionDenied("Вы можете менять статус только у своих лидов")
             return
 
         forbidden_ids = []
@@ -2155,7 +2171,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 continue
             forbidden_ids.append(str(lead.id))
         if forbidden_ids:
-            raise PermissionDenied("Teamleaders can change status only for own and manager/teamleader leads")
+            raise PermissionDenied("Тимлиды могут менять статус только у своих лидов и лидов менеджеров/тимлидов")
 
     def _teamleader_can_manage_manager_scope(self, lead: Lead) -> bool:
         if lead.manager_id == self.request.user.id:
@@ -2170,7 +2186,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
             return
         raise PermissionDenied(
-            "Only teamleaders (own/manager/teamleader leads), admins, and superusers can use force status change"
+            "Только тимлиды (по своим/менеджерским/тимлидерским лидам), админы и суперпользователи могут использовать принудительную смену статуса"
         )
 
     def _assert_can_set_tags(self, lead: Lead):
@@ -2179,7 +2195,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             return
         if role == UserRole.TEAMLEADER and self._teamleader_can_manage_manager_scope(lead):
             return
-        raise PermissionDenied("Only teamleaders, admins and superusers can change lead tags")
+        raise PermissionDenied("Только тимлиды, админы и суперпользователи могут менять теги лида")
 
     def create(self, request, *args, **kwargs):
         self._assert_can_create()
@@ -2322,7 +2338,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             if single is not None:
                 files = [single]
         if not files:
-            raise serializers.ValidationError({"files": "Provide at least one file"})
+            raise serializers.ValidationError({"files": "Передайте хотя бы один файл"})
 
         reason = serializer.validated_data.get("reason", "")
         requested_kind = serializer.validated_data.get("kind")
@@ -2402,8 +2418,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             missing = [str(lead_id) for lead_id in lead_ids if lead_id not in leads_map]
             if missing:
                 if not allow_partial:
-                    raise serializers.ValidationError({"lead_ids": f"Unknown lead ids: {', '.join(missing)}"})
-                failed.update({lead_id: "Unknown lead id" for lead_id in missing})
+                    raise serializers.ValidationError({"lead_ids": f"Неизвестные ID лидов: {', '.join(missing)}"})
+                failed.update({lead_id: "Неизвестный ID лида" for lead_id in missing})
 
             for lead_id in lead_ids:
                 lead = leads_map.get(lead_id)
@@ -2419,7 +2435,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 elif mode == "clear":
                     lead.tags.clear()
                 else:
-                    raise ValueError(f"Unsupported bulk tag mode: {mode}")
+                    raise ValueError(f"Неподдерживаемый режим bulk-тегов: {mode}")
                 after_tags = _lead_tags_payload(lead)
                 after_tag_ids = {tag["id"] for tag in after_tags}
                 if before_tag_ids == after_tag_ids:
@@ -2503,14 +2519,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
         if "manager" in request.query_params:
-            raise serializers.ValidationError({"manager": "manager filter is not supported in this endpoint"})
+            raise serializers.ValidationError({"manager": "Фильтр manager не поддерживается в этом эндпоинте"})
         query = LeadFunnelMetricsQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
 
         date_to = query.validated_data.get("date_to") or timezone.localdate()
         date_from = query.validated_data.get("date_from") or (date_to - timedelta(days=30))
         if date_from > date_to:
-            raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
+            raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
 
         tz = timezone.get_current_timezone()
         period_start = timezone.make_aware(datetime.combine(date_from, time.min), tz)
@@ -2802,7 +2818,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             else:
                 _set_first_manager_if_needed(lead, update_fields=update_fields)
             lead.save(update_fields=update_fields)
-            _log_manager_audit(
+            manager_audit = _log_manager_audit(
                 lead=lead,
                 actor_user=request.user,
                 source=LeadAuditSource.API,
@@ -2810,6 +2826,30 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 from_manager=previous_manager,
                 to_manager=manager,
             )
+            if getattr(previous_manager, "id", None) != manager.id:
+                def _emit_assignment_notifications(
+                    *,
+                    lead_id=lead.id,
+                    to_manager_id=manager.id,
+                    actor_user_id=request.user.id,
+                    from_manager_id=getattr(previous_manager, "id", None),
+                    manager_audit_id=getattr(manager_audit, "id", None),
+                ):
+                    emit_lead_assigned_notification(
+                        lead_id=lead_id,
+                        to_manager_id=to_manager_id,
+                        actor_user_id=actor_user_id,
+                        from_manager_id=from_manager_id,
+                    )
+                    if from_manager_id:
+                        emit_lead_unassigned_notification(
+                            lead_id=lead_id,
+                            from_manager_id=from_manager_id,
+                            actor_user_id=actor_user_id,
+                            audit_log_id=manager_audit_id,
+                        )
+
+                transaction.on_commit(_emit_assignment_notifications)
             if set_as_first_manager:
                 _log_first_manager_audit(
                     lead=lead,
@@ -2857,7 +2897,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             previous_manager = lead.manager
             lead.manager = None
             lead.save(update_fields=["manager", "updated_at"])
-            _log_manager_audit(
+            manager_audit = _log_manager_audit(
                 lead=lead,
                 actor_user=request.user,
                 source=LeadAuditSource.API,
@@ -2865,6 +2905,15 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 from_manager=previous_manager,
                 to_manager=None,
             )
+            if getattr(previous_manager, "id", None):
+                transaction.on_commit(
+                    lambda lead_id=lead.id, from_manager_id=previous_manager.id, actor_user_id=request.user.id, manager_audit_id=getattr(manager_audit, "id", None): emit_lead_unassigned_notification(
+                        lead_id=lead_id,
+                        from_manager_id=from_manager_id,
+                        actor_user_id=actor_user_id,
+                        audit_log_id=manager_audit_id,
+                    )
+                )
 
             response_payload = LeadSerializer(lead).data
             _save_idempotency_response(
@@ -2901,6 +2950,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         updated_ids = []
         failed: dict[str, str] = {}
+        assignment_notification_items: list[tuple[int, int, int, int | None, int | None]] = []
         response_payload = None
         with transaction.atomic():
             idempotency_record, cached_response = _acquire_idempotency_record(
@@ -2925,8 +2975,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             missing = [str(lead_id) for lead_id in lead_ids if lead_id not in leads_map]
             if missing:
                 if not allow_partial:
-                    raise serializers.ValidationError({"lead_ids": f"Unknown lead ids: {', '.join(missing)}"})
-                failed.update({lead_id: "Unknown lead id" for lead_id in missing})
+                    raise serializers.ValidationError({"lead_ids": f"Неизвестные ID лидов: {', '.join(missing)}"})
+                failed.update({lead_id: "Неизвестный ID лида" for lead_id in missing})
 
             for lead_id in lead_ids:
                 lead = leads_map.get(lead_id)
@@ -2951,7 +3001,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 else:
                     _set_first_manager_if_needed(lead, update_fields=update_fields)
                 lead.save(update_fields=update_fields)
-                _log_manager_audit(
+                manager_audit = _log_manager_audit(
                     lead=lead,
                     actor_user=request.user,
                     source=LeadAuditSource.API,
@@ -2960,6 +3010,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     to_manager=manager,
                     batch_id=batch_id,
                 )
+                if getattr(previous_manager, "id", None) != manager.id:
+                    assignment_notification_items.append(
+                        (lead.id, manager.id, request.user.id, getattr(previous_manager, "id", None), getattr(manager_audit, "id", None))
+                    )
                 if set_as_first_manager:
                     _log_first_manager_audit(
                         lead=lead,
@@ -2992,6 +3046,24 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_status=status.HTTP_200_OK,
                 response_body=response_payload,
             )
+            if assignment_notification_items:
+                def _emit_bulk_assign_notifications(items=tuple(assignment_notification_items)):
+                    for lead_id, to_manager_id, actor_user_id, from_manager_id, manager_audit_id in items:
+                        emit_lead_assigned_notification(
+                            lead_id=lead_id,
+                            to_manager_id=to_manager_id,
+                            actor_user_id=actor_user_id,
+                            from_manager_id=from_manager_id,
+                        )
+                        if from_manager_id:
+                            emit_lead_unassigned_notification(
+                                lead_id=lead_id,
+                                from_manager_id=from_manager_id,
+                                actor_user_id=actor_user_id,
+                                audit_log_id=manager_audit_id,
+                            )
+
+                transaction.on_commit(_emit_bulk_assign_notifications)
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -3014,6 +3086,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         updated_ids = []
         failed: dict[str, str] = {}
+        unassign_notification_items: list[tuple[int, int, int, int | None]] = []
         response_payload = None
         with transaction.atomic():
             idempotency_record, cached_response = _acquire_idempotency_record(
@@ -3033,8 +3106,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             missing = [str(lead_id) for lead_id in lead_ids if lead_id not in leads_map]
             if missing:
                 if not allow_partial:
-                    raise serializers.ValidationError({"lead_ids": f"Unknown lead ids: {', '.join(missing)}"})
-                failed.update({lead_id: "Unknown lead id" for lead_id in missing})
+                    raise serializers.ValidationError({"lead_ids": f"Неизвестные ID лидов: {', '.join(missing)}"})
+                failed.update({lead_id: "Неизвестный ID лида" for lead_id in missing})
 
             for lead_id in lead_ids:
                 lead = leads_map.get(lead_id)
@@ -3044,7 +3117,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 previous_manager = lead.manager
                 lead.manager = None
                 lead.save(update_fields=["manager", "updated_at"])
-                _log_manager_audit(
+                manager_audit = _log_manager_audit(
                     lead=lead,
                     actor_user=request.user,
                     source=LeadAuditSource.API,
@@ -3053,6 +3126,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     to_manager=None,
                     batch_id=batch_id,
                 )
+                if getattr(previous_manager, "id", None):
+                    unassign_notification_items.append(
+                        (lead.id, previous_manager.id, request.user.id, getattr(manager_audit, "id", None))
+                    )
                 updated_ids.append(str(lead.id))
 
             refreshed_leads = list(
@@ -3073,6 +3150,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_status=status.HTTP_200_OK,
                 response_body=response_payload,
             )
+            if unassign_notification_items:
+                def _emit_bulk_unassign_notifications(items=tuple(unassign_notification_items)):
+                    for lead_id, from_manager_id, actor_user_id, manager_audit_id in items:
+                        emit_lead_unassigned_notification(
+                            lead_id=lead_id,
+                            from_manager_id=from_manager_id,
+                            actor_user_id=actor_user_id,
+                            audit_log_id=manager_audit_id,
+                        )
+
+                transaction.on_commit(_emit_bulk_unassign_notifications)
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -3133,7 +3221,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 "status_bucket": _status_conversion_bucket(to_status),
             }
 
-            _log_status_audit(
+            status_audit = _log_status_audit(
                 event_type=LeadAuditEvent.STATUS_CHANGED,
                 actor_user=request.user,
                 source=LeadAuditSource.API,
@@ -3145,6 +3233,15 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 to_status=to_status,
                 payload_before=payload_before,
                 payload_after=payload_after,
+            )
+            transaction.on_commit(
+                lambda lead_id=lead.id, from_status_id=getattr(from_status, "id", None), to_status_id=to_status.id, actor_user_id=request.user.id, status_audit_id=getattr(status_audit, "id", None): emit_lead_status_changed_notification(
+                    lead_id=lead_id,
+                    from_status_id=from_status_id,
+                    to_status_id=to_status_id,
+                    actor_user_id=actor_user_id,
+                    audit_log_id=status_audit_id,
+                )
             )
 
             response_payload = LeadSerializer(lead).data
@@ -3176,6 +3273,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         updated_ids = []
         failed: dict[str, str] = {}
+        status_notification_items: list[tuple[int, int | None, int, int, int | None]] = []
         response_payload = None
         with transaction.atomic():
             idempotency_record, cached_response = _acquire_idempotency_record(
@@ -3199,8 +3297,8 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             missing = [str(lead_id) for lead_id in lead_ids if lead_id not in leads_map]
             if missing:
                 if not allow_partial:
-                    raise serializers.ValidationError({"lead_ids": f"Unknown lead ids: {', '.join(missing)}"})
-                failed.update({lead_id: "Unknown lead id" for lead_id in missing})
+                    raise serializers.ValidationError({"lead_ids": f"Неизвестные ID лидов: {', '.join(missing)}"})
+                failed.update({lead_id: "Неизвестный ID лида" for lead_id in missing})
 
             errors = {}
             for lead_id in lead_ids:
@@ -3244,7 +3342,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     "status_bucket": _status_conversion_bucket(to_status),
                 }
 
-                _log_status_audit(
+                status_audit = _log_status_audit(
                     event_type=LeadAuditEvent.STATUS_CHANGED,
                     actor_user=request.user,
                     source=LeadAuditSource.API,
@@ -3257,6 +3355,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     to_status=to_status,
                     payload_before=payload_before,
                     payload_after=payload_after,
+                )
+                status_notification_items.append(
+                    (lead.id, getattr(from_status, "id", None), to_status.id, request.user.id, getattr(status_audit, "id", None))
                 )
                 updated_ids.append(str(lead.id))
 
@@ -3278,5 +3379,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_status=status.HTTP_200_OK,
                 response_body=response_payload,
             )
+            if status_notification_items:
+                def _emit_bulk_status_notifications(items=tuple(status_notification_items)):
+                    for lead_id, from_status_id, to_status_id, actor_user_id, status_audit_id in items:
+                        emit_lead_status_changed_notification(
+                            lead_id=lead_id,
+                            from_status_id=from_status_id,
+                            to_status_id=to_status_id,
+                            actor_user_id=actor_user_id,
+                            audit_log_id=status_audit_id,
+                        )
+
+                transaction.on_commit(_emit_bulk_status_notifications)
 
         return Response(response_payload, status=status.HTTP_200_OK)

@@ -37,7 +37,7 @@ def custom_exception_handler(exc, context):
         payload = {
             "error": {
                 "code": "internal_error",
-                "message": "Internal server error",
+                "message": "Внутренняя ошибка сервера",
                 "details": None,
                 "request_id": request_id,
             }
@@ -46,12 +46,12 @@ def custom_exception_handler(exc, context):
 
     # Нормализуем код/сообщение/детали
     code = "error"
-    message = "Request failed"
+    message = "Запрос не выполнен"
     details: Any = response.data
 
     if isinstance(exc, ValidationError):
         code = "validation_error"
-        message = "Validation failed"
+        message = "Ошибка валидации"
     else:
         # DRF APIException часто имеет атрибут default_code
         code = getattr(exc, "default_code", "error")

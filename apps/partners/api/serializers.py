@@ -4,6 +4,7 @@ import re
 
 from django.utils import timezone
 from rest_framework import serializers
+from apps.core.notifications import emit_partner_duplicate_attempt_notification
 from apps.partners.models import Partner, PartnerSource, PartnerToken
 from apps.leads.models import (
     Lead,
@@ -113,7 +114,7 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
         partner = attrs.get("partner") or getattr(instance, "partner", None)
         source = attrs.get("source") if "source" in attrs else getattr(instance, "source", None)
         if source is not None and partner is not None and source.partner_id != partner.id:
-            raise serializers.ValidationError({"source": "source must belong to selected partner"})
+            raise serializers.ValidationError({"source": "source должен принадлежать выбранному партнеру"})
         return attrs
 
     def create(self, validated_data):
@@ -189,7 +190,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     is_active=True,
                 ).first()
                 if not source:
-                    raise serializers.ValidationError({"source_code": "Unknown source_code for this partner"})
+                    raise serializers.ValidationError({"source_code": "Неизвестный source_code для этого партнера"})
                 attrs["_source"] = source
             else:
                 attrs["_source"] = None
@@ -197,13 +198,13 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         phone = (attrs.get("phone") or "").strip()
         email = (attrs.get("email") or "").strip()
         if not phone:
-            raise serializers.ValidationError({"phone": "phone is required"})
+            raise serializers.ValidationError({"phone": "Телефон обязателен"})
 
         attrs["phone"] = phone
         attrs["email"] = email
         geo = (attrs.get("geo") or "").strip().upper()
         if geo and not GEO_CODE_RE.fullmatch(geo):
-            raise serializers.ValidationError({"geo": "geo must be a 2-letter uppercase country code"})
+            raise serializers.ValidationError({"geo": "geo должен быть кодом страны из 2 заглавных букв"})
         attrs["geo"] = geo
         attrs["full_name"] = (attrs.get("full_name") or "").strip()
         return attrs
@@ -237,7 +238,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     entity_type=LeadAuditEntity.DUPLICATE_ATTEMPT,
                     entity_id=str(attempt.id),
                     source=LeadAuditSource.IMPORT,
-                    reason="Duplicate phone rejected",
+                    reason="Отклонен дубликат телефона",
                     payload_before={"lead_id": str(duplicate_lead.id), "phone": duplicate_lead.phone},
                     payload_after={
                         "attempt_id": str(attempt.id),
@@ -248,6 +249,9 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                         "full_name": attempt.full_name,
                         "email": attempt.email,
                     },
+                )
+                transaction.on_commit(
+                    lambda attempt_id=attempt.id: emit_partner_duplicate_attempt_notification(attempt_id=attempt_id)
                 )
                 duplicate_lead._was_created = False
                 duplicate_lead._duplicate_rejected = True
@@ -283,7 +287,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 entity_type=LeadAuditEntity.DUPLICATE_ATTEMPT,
                 entity_id=str(attempt.id),
                 source=LeadAuditSource.IMPORT,
-                reason="Duplicate phone rejected",
+                reason="Отклонен дубликат телефона",
                 payload_before={"lead_id": str(duplicate_lead.id), "phone": duplicate_lead.phone},
                 payload_after={
                     "attempt_id": str(attempt.id),
@@ -294,6 +298,9 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     "full_name": attempt.full_name,
                     "email": attempt.email,
                 },
+            )
+            transaction.on_commit(
+                lambda attempt_id=attempt.id: emit_partner_duplicate_attempt_notification(attempt_id=attempt_id)
             )
             duplicate_lead._was_created = False
             duplicate_lead._duplicate_rejected = True

@@ -36,7 +36,7 @@ class PartnerTokenAuthentication(BaseAuthentication):
 
         raw = raw.strip()
         if len(raw) < 20:
-            raise AuthenticationFailed("Invalid partner token")
+            raise AuthenticationFailed("Неверный токен партнера")
 
         from apps.partners.models import PartnerToken as PT  # avoid circular
         token_hash = PT.hash_token(raw)
@@ -49,13 +49,13 @@ class PartnerTokenAuthentication(BaseAuthentication):
             .first()
         )
         if not token:
-            raise AuthenticationFailed("Invalid partner token")
+            raise AuthenticationFailed("Неверный токен партнера")
 
         if not token.partner.is_active:
-            raise AuthenticationFailed("Partner is inactive")
+            raise AuthenticationFailed("Партнер неактивен")
 
         if token.expires_at and token.expires_at <= timezone.now():
-            raise AuthenticationFailed("Partner token expired")
+            raise AuthenticationFailed("Срок действия токена партнера истек")
 
         # touch last_used_at (не каждую миллисекунду, но пока просто)
         PartnerToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())

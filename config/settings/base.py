@@ -28,6 +28,12 @@ env = environ.Env(
     API_PAGE_SIZE=(int, 50),
     API_MAX_PAGE_SIZE=(int, 200),
     LEADS_BULK_STATUS_CHANGE_MAX_IDS=(int, 500),
+    NOTIFICATIONS_MANAGER_NO_ACTIVITY_THRESHOLD=(int, 5),
+    NOTIFICATIONS_PARTNER_DUPLICATE_THRESHOLD=(int, 10),
+    NOTIFICATIONS_PARTNER_DUPLICATE_WINDOW_MINUTES=(int, 60),
+    CELERY_BROKER_URL=(str, "redis://127.0.0.1:6379/0"),
+    CELERY_RESULT_BACKEND=(str, "redis://127.0.0.1:6379/1"),
+    CELERY_TASK_ALWAYS_EAGER=(bool, False),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -119,7 +125,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = "en-us"
+LANGUAGE_CODE = "ru-ru"
 TIME_ZONE = "Europe/Warsaw"
 USE_I18N = True
 USE_TZ = True
@@ -137,6 +143,31 @@ PARTNER_LEADS_MAX_PAGE_SIZE = env.int("PARTNER_LEADS_MAX_PAGE_SIZE", default=200
 API_PAGE_SIZE = env.int("API_PAGE_SIZE", default=50)
 API_MAX_PAGE_SIZE = env.int("API_MAX_PAGE_SIZE", default=200)
 LEADS_BULK_STATUS_CHANGE_MAX_IDS = env.int("LEADS_BULK_STATUS_CHANGE_MAX_IDS", default=500)
+NOTIFICATIONS_MANAGER_NO_ACTIVITY_THRESHOLD = env.int("NOTIFICATIONS_MANAGER_NO_ACTIVITY_THRESHOLD", default=5)
+NOTIFICATIONS_PARTNER_DUPLICATE_THRESHOLD = env.int("NOTIFICATIONS_PARTNER_DUPLICATE_THRESHOLD", default=10)
+NOTIFICATIONS_PARTNER_DUPLICATE_WINDOW_MINUTES = env.int("NOTIFICATIONS_PARTNER_DUPLICATE_WINDOW_MINUTES", default=60)
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://127.0.0.1:6379/0")
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://127.0.0.1:6379/1")
+CELERY_TASK_ALWAYS_EAGER = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_BEAT_SCHEDULE = {
+    "notifications-process-due": {
+        "task": "apps.core.tasks.process_due_notifications_task",
+        "schedule": 10.0,
+        "args": (500,),
+    },
+    "notifications-emit-overdue": {
+        "task": "apps.core.tasks.emit_overdue_notifications_task",
+        "schedule": 300.0,
+        "args": (500,),
+    },
+    "notifications-manager-no-activity": {
+        "task": "apps.core.tasks.emit_manager_no_activity_notifications_task",
+        "schedule": 120.0,
+        "args": (500,),
+    },
+}
 
 # DRF
 REST_FRAMEWORK = {

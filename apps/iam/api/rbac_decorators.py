@@ -12,12 +12,12 @@ def require_perms(*perms: str, require_all: bool = True):
         @wraps(fn)
         def wrapper(request, *args, **kwargs):
             if not request.user or not request.user.is_authenticated:
-                return Response({"detail": "Authentication credentials were not provided."},
+                return Response({"detail": "Не переданы учетные данные для аутентификации."},
                                 status=status.HTTP_401_UNAUTHORIZED)
 
             ok = has_all_perms(request.user, perms) if require_all else has_any_perm(request.user, perms)
             if not ok:
-                return Response({"detail": "You do not have permission to perform this action."},
+                return Response({"detail": "У вас нет прав для выполнения этого действия."},
                                 status=status.HTTP_403_FORBIDDEN)
 
             return fn(request, *args, **kwargs)

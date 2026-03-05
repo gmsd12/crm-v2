@@ -27,6 +27,8 @@ docs/tasks.txt
 # Coverage
 coverage/
 htmlcov/
+celerybeat-schedule
+.run/
 
 # Frontend artifacts (if present)
 node_modules/

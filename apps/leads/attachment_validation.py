@@ -47,17 +47,17 @@ def _read_file_head(uploaded_file, size: int = 8192) -> bytes:
 
 def validate_uploaded_attachment(uploaded_file, *, requested_kind: str | None = None) -> tuple[str, str]:
     if magic is None:
-        raise AttachmentValidationError("python-magic is not installed in the current environment")
+        raise AttachmentValidationError("python-magic не установлен в текущем окружении")
 
     head = _read_file_head(uploaded_file)
     detected_mime = (magic.from_buffer(head, mime=True) or "").lower().strip()
     resolved_kind = ALLOWED_ATTACHMENT_MIME_TO_KIND.get(detected_mime)
     if resolved_kind is None:
-        raise AttachmentValidationError("Only audio and image files are allowed")
+        raise AttachmentValidationError("Разрешены только аудио и изображения")
 
     if requested_kind and requested_kind != resolved_kind:
         raise AttachmentValidationError(
-            f"Detected file type is {resolved_kind}, but requested kind is {requested_kind}",
+            f"Определен тип файла {resolved_kind}, но запрошенный kind: {requested_kind}",
             field="kind",
         )
 

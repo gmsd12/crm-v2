@@ -234,21 +234,21 @@ class LeadWriteSerializer(serializers.ModelSerializer):
 
         partner = attrs.get("partner") or getattr(instance, "partner", None)
         if not partner:
-            raise serializers.ValidationError({"partner": "This field is required"})
+            raise serializers.ValidationError({"partner": "Это поле обязательно"})
 
         phone = (attrs.get("phone") if "phone" in attrs else getattr(instance, "phone", "")) or ""
         email = (attrs.get("email") if "email" in attrs else getattr(instance, "email", "")) or ""
         phone = phone.strip()
         email = email.strip().lower()
         if not phone:
-            raise serializers.ValidationError({"phone": "phone is required"})
+            raise serializers.ValidationError({"phone": "Телефон обязателен"})
 
         attrs["phone"] = phone
         attrs["email"] = email
         geo = (attrs.get("geo") if "geo" in attrs else getattr(instance, "geo", "")) or ""
         geo = geo.strip().upper()
         if geo and not GEO_CODE_RE.fullmatch(geo):
-            raise serializers.ValidationError({"geo": "geo must be a 2-letter uppercase country code"})
+            raise serializers.ValidationError({"geo": "geo должен быть кодом страны из 2 заглавных букв"})
         attrs["geo"] = geo
         attrs["full_name"] = ((attrs.get("full_name") if "full_name" in attrs else getattr(instance, "full_name", "")) or "").strip()
         if "next_contact_at" in attrs and attrs["next_contact_at"] is not None:
@@ -264,7 +264,7 @@ class LeadWriteSerializer(serializers.ModelSerializer):
         if instance:
             duplicate_qs = duplicate_qs.exclude(id=instance.id)
         if phone and duplicate_qs.filter(phone=phone).exists():
-            raise serializers.ValidationError({"phone": "Duplicate phone"})
+            raise serializers.ValidationError({"phone": "Дублирующийся телефон"})
 
         return attrs
 
@@ -279,7 +279,7 @@ class LeadStatusChangeSerializer(serializers.Serializer):
         to_status = attrs["to_status"]
         reason = (attrs.get("reason") or "").strip()
         if to_status.id == lead.status_id:
-            raise serializers.ValidationError({"to_status": "Lead already has this status"})
+            raise serializers.ValidationError({"to_status": "У лида уже этот статус"})
 
         attrs["reason"] = reason
         return attrs
@@ -302,7 +302,7 @@ class BulkLeadStatusChangeSerializer(serializers.Serializer):
         unique_ids = list(dict.fromkeys(lead_ids))
         max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
         if len(unique_ids) > max_ids:
-            raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+            raise serializers.ValidationError({"lead_ids": f"Максимум {max_ids} ID лидов за запрос"})
 
         attrs["reason"] = reason
         attrs["_lead_ids"] = unique_ids
@@ -353,7 +353,7 @@ class BulkLeadAssignManagerSerializer(serializers.Serializer):
         unique_ids = list(dict.fromkeys(attrs["lead_ids"]))
         max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
         if len(unique_ids) > max_ids:
-            raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+            raise serializers.ValidationError({"lead_ids": f"Максимум {max_ids} ID лидов за запрос"})
         if "first_assigned_at" in attrs and attrs["first_assigned_at"] is not None:
             dt = attrs["first_assigned_at"]
             if timezone.is_naive(dt):
@@ -383,7 +383,7 @@ class BulkLeadUnassignManagerSerializer(serializers.Serializer):
         unique_ids = list(dict.fromkeys(attrs["lead_ids"]))
         max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
         if len(unique_ids) > max_ids:
-            raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+            raise serializers.ValidationError({"lead_ids": f"Максимум {max_ids} ID лидов за запрос"})
         attrs["reason"] = (attrs.get("reason") or "").strip()
         attrs["_lead_ids"] = unique_ids
         return attrs
@@ -399,7 +399,7 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         date_from = attrs.get("date_from")
         date_to = attrs.get("date_to")
         if date_from and date_to and date_from > date_to:
-            raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
+            raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
         return attrs
 
 
@@ -417,7 +417,7 @@ class LeadDepositStatsQuerySerializer(serializers.Serializer):
         attrs["date_from"] = date_from
         attrs["date_to"] = date_to
         if date_from and date_to and date_from > date_to:
-            raise serializers.ValidationError({"date_from": "date_from must be less than or equal to date_to"})
+            raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
         return attrs
 
 
@@ -448,7 +448,7 @@ class _BulkLeadTagBaseSerializer(serializers.Serializer):
         unique_ids = list(dict.fromkeys(attrs["lead_ids"]))
         max_ids = int(getattr(settings, "LEADS_BULK_STATUS_CHANGE_MAX_IDS", 500))
         if len(unique_ids) > max_ids:
-            raise serializers.ValidationError({"lead_ids": f"Maximum {max_ids} lead ids allowed per request"})
+            raise serializers.ValidationError({"lead_ids": f"Максимум {max_ids} ID лидов за запрос"})
         attrs["reason"] = (attrs.get("reason") or "").strip()
         attrs["_lead_ids"] = unique_ids
         return attrs

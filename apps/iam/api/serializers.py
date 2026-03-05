@@ -12,9 +12,9 @@ class LoginSerializer(serializers.Serializer):
     def validate(self, attrs):
         user = authenticate(username=attrs["username"], password=attrs["password"])
         if not user:
-            raise serializers.ValidationError("Invalid credentials")
+            raise serializers.ValidationError("Неверные учетные данные")
         if not user.is_active:
-            raise serializers.ValidationError("User is inactive")
+            raise serializers.ValidationError("Пользователь неактивен")
         attrs["user"] = user
         return attrs
 
