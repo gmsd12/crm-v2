@@ -32,6 +32,8 @@ from apps.iam.api.rbac_permissions import RBACPermission
 from apps.iam.models import UserRole
 from apps.iam.rbac import Perm
 from apps.core.notifications import (
+    emit_bulk_lead_assigned_notification,
+    emit_bulk_lead_unassigned_notification,
     emit_comment_added_notification,
     emit_deposit_created_notification,
     emit_lead_assigned_notification,
@@ -3047,7 +3049,34 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_body=response_payload,
             )
             if assignment_notification_items:
+                bulk_summary_threshold = int(getattr(settings, "NOTIFICATIONS_BULK_SUMMARY_THRESHOLD", 20))
+
                 def _emit_bulk_assign_notifications(items=tuple(assignment_notification_items)):
+                    if len(items) >= bulk_summary_threshold:
+                        lead_ids = [lead_id for lead_id, _to_manager_id, _actor_user_id, _from_manager_id, _manager_audit_id in items]
+                        from_manager_ids = [
+                            from_manager_id
+                            for _lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in items
+                            if from_manager_id
+                        ]
+                        emit_bulk_lead_assigned_notification(
+                            lead_ids=lead_ids,
+                            to_manager_id=manager.id,
+                            actor_user_id=request.user.id,
+                            from_manager_ids=from_manager_ids,
+                            batch_id=batch_id,
+                        )
+                        emit_bulk_lead_unassigned_notification(
+                            lead_to_from_manager=[
+                                (lead_id, from_manager_id)
+                                for lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in items
+                                if from_manager_id
+                            ],
+                            actor_user_id=request.user.id,
+                            batch_id=batch_id,
+                        )
+                        return
+
                     for lead_id, to_manager_id, actor_user_id, from_manager_id, manager_audit_id in items:
                         emit_lead_assigned_notification(
                             lead_id=lead_id,
@@ -3151,7 +3180,17 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_body=response_payload,
             )
             if unassign_notification_items:
+                bulk_summary_threshold = int(getattr(settings, "NOTIFICATIONS_BULK_SUMMARY_THRESHOLD", 20))
+
                 def _emit_bulk_unassign_notifications(items=tuple(unassign_notification_items)):
+                    if len(items) >= bulk_summary_threshold:
+                        emit_bulk_lead_unassigned_notification(
+                            lead_to_from_manager=[(lead_id, from_manager_id) for lead_id, from_manager_id, _actor_user_id, _manager_audit_id in items],
+                            actor_user_id=request.user.id,
+                            batch_id=batch_id,
+                        )
+                        return
+
                     for lead_id, from_manager_id, actor_user_id, manager_audit_id in items:
                         emit_lead_unassigned_notification(
                             lead_id=lead_id,

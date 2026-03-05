@@ -308,6 +308,73 @@ def emit_lead_assigned_notification(*, lead_id: int, to_manager_id: int, actor_u
     return created_notification
 
 
+def emit_bulk_lead_assigned_notification(
+    *,
+    lead_ids: list[int],
+    to_manager_id: int,
+    actor_user_id: int | None,
+    from_manager_ids: list[int] | None = None,
+    batch_id: str | None = None,
+) -> int:
+    unique_lead_ids = [int(lead_id) for lead_id in dict.fromkeys(lead_ids)]
+    if not unique_lead_ids:
+        return 0
+
+    sample_lead = (
+        Lead.objects.select_related("manager")
+        .filter(id__in=unique_lead_ids)
+        .order_by("id")
+        .first()
+    )
+    if sample_lead is None:
+        return 0
+
+    to_manager = User.objects.filter(id=to_manager_id, is_active=True).only("id", "username").first()
+    to_manager_name = getattr(to_manager, "username", "") or f"пользователь {to_manager_id}"
+    changed_from_count = len({int(manager_id) for manager_id in (from_manager_ids or []) if manager_id})
+    recipients = _resolve_lead_event_recipients(
+        event_type=NotificationEvent.LEAD_ASSIGNED,
+        lead=sample_lead,
+        primary_recipient_ids=[to_manager_id],
+    )
+
+    lead_count = len(unique_lead_ids)
+    sample_ids = unique_lead_ids[:20]
+    status_breakdown = _collect_status_breakdown_for_leads(unique_lead_ids)
+    status_counts = {
+        (row.get("status_code") or "NO_STATUS"): int(row.get("count") or 0)
+        for row in status_breakdown
+    }
+    batch_key = batch_id or f"{to_manager_id}:{lead_count}:{sample_ids[0]}:{sample_ids[-1]}"
+    created = 0
+    for recipient in recipients:
+        if actor_user_id is not None and actor_user_id == recipient.id:
+            continue
+        item = emit(
+            NotificationEmitPayload(
+                event_type=NotificationEvent.LEAD_ASSIGNED,
+                recipient_id=recipient.id,
+                actor_user_id=actor_user_id,
+                lead_id=None,
+                title=f"Массовое назначение: {lead_count} лидов",
+                body=f"Назначено на {to_manager_name}",
+                payload={
+                    "batch_id": batch_id,
+                    "mode": "bulk_summary",
+                    "lead_count": lead_count,
+                    "to_manager_id": str(to_manager_id),
+                    "from_manager_count": changed_from_count,
+                    "status_counts": status_counts,
+                    "status_breakdown": status_breakdown,
+                },
+                dedupe_key=f"lead_assigned_bulk:{batch_key}:{recipient.id}",
+            )
+        )
+        if item is not None:
+            created += 1
+    return created
+
+
 def emit_lead_unassigned_notification(
     *,
     lead_id: int,
@@ -360,6 +427,115 @@ def emit_lead_unassigned_notification(
         if item is not None and created_notification is None:
             created_notification = item
     return created_notification
+
+
+def emit_bulk_lead_unassigned_notification(
+    *,
+    lead_to_from_manager: list[tuple[int, int]],
+    actor_user_id: int | None,
+    batch_id: str | None = None,
+) -> int:
+    if not lead_to_from_manager:
+        return 0
+
+    grouped: dict[int, list[int]] = {}
+    for lead_id, from_manager_id in lead_to_from_manager:
+        if not from_manager_id:
+            continue
+        grouped.setdefault(int(from_manager_id), []).append(int(lead_id))
+    if not grouped:
+        return 0
+
+    managers = {
+        manager.id: manager
+        for manager in User.objects.filter(id__in=grouped.keys(), is_active=True).only("id", "username", "role")
+    }
+    sample_lead_ids = [lead_ids[0] for lead_ids in grouped.values() if lead_ids]
+    leads_map = {
+        lead.id: lead
+        for lead in Lead.objects.select_related("manager").filter(id__in=sample_lead_ids)
+    }
+
+    created = 0
+    for from_manager_id, grouped_lead_ids in grouped.items():
+        manager = managers.get(from_manager_id)
+        if manager is None:
+            continue
+        sample_lead = leads_map.get(grouped_lead_ids[0])
+        if sample_lead is None:
+            continue
+
+        recipients = _resolve_lead_event_recipients(
+            event_type=NotificationEvent.LEAD_UNASSIGNED,
+            lead=sample_lead,
+            primary_recipient_ids=[from_manager_id],
+            manager_id_for_scope=from_manager_id,
+            manager_role_for_scope=getattr(manager, "role", None),
+        )
+        if not recipients:
+            continue
+
+        sample_ids = grouped_lead_ids[:20]
+        lead_count = len(grouped_lead_ids)
+        status_breakdown = _collect_status_breakdown_for_leads(grouped_lead_ids)
+        status_counts = {
+            (row.get("status_code") or "NO_STATUS"): int(row.get("count") or 0)
+            for row in status_breakdown
+        }
+        from_username = getattr(manager, "username", "") or f"пользователь {from_manager_id}"
+        batch_key = batch_id or f"{from_manager_id}:{lead_count}:{sample_ids[0]}:{sample_ids[-1]}"
+
+        for recipient in recipients:
+            if actor_user_id is not None and actor_user_id == recipient.id:
+                continue
+            item = emit(
+                NotificationEmitPayload(
+                    event_type=NotificationEvent.LEAD_UNASSIGNED,
+                    recipient_id=recipient.id,
+                    actor_user_id=actor_user_id,
+                    lead_id=None,
+                    title=f"Массовое снятие: {lead_count} лидов",
+                    body=f"Снято с {from_username}",
+                    payload={
+                        "batch_id": batch_id,
+                        "mode": "bulk_summary",
+                        "lead_count": lead_count,
+                        "from_manager_id": str(from_manager_id),
+                        "status_counts": status_counts,
+                        "status_breakdown": status_breakdown,
+                    },
+                    dedupe_key=f"lead_unassigned_bulk:{batch_key}:{recipient.id}",
+                )
+            )
+            if item is not None:
+                created += 1
+    return created
+
+
+def _collect_status_breakdown_for_leads(lead_ids: list[int]) -> list[dict]:
+    unique_lead_ids = [int(lead_id) for lead_id in dict.fromkeys(lead_ids)]
+    if not unique_lead_ids:
+        return []
+    rows = (
+        Lead.objects.filter(id__in=unique_lead_ids)
+        .values("status_id", "status__code", "status__name")
+        .annotate(count=Count("id"))
+        .order_by("-count", "status__code")
+    )
+    result: list[dict] = []
+    for row in rows:
+        status_id = row.get("status_id")
+        status_code = row.get("status__code") or "NO_STATUS"
+        status_name = row.get("status__name") or "Без статуса"
+        result.append(
+            {
+                "status_id": str(status_id) if status_id else None,
+                "status_code": status_code,
+                "status_name": status_name,
+                "count": int(row.get("count") or 0),
+            }
+        )
+    return result
 
 
 def _status_conversion_bucket(status_obj: LeadStatus | None) -> str:

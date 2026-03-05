@@ -131,6 +131,69 @@ class NotificationApiTests(APITestCase):
             ).exists()
         )
 
+    @override_settings(NOTIFICATIONS_BULK_SUMMARY_THRESHOLD=2)
+    def test_bulk_assign_notifications_are_summarized_above_threshold(self):
+        actor_admin = User.objects.create_user(username="notif_bulk_actor", password="pass12345", role=UserRole.ADMIN)
+        watcher_admin = User.objects.create_user(username="notif_bulk_watcher", password="pass12345", role=UserRole.ADMIN)
+        old_manager = User.objects.create_user(username="notif_bulk_old_mgr", password="pass12345", role=UserRole.MANAGER)
+        new_manager = User.objects.create_user(username="notif_bulk_new_mgr", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Bulk Assign Partner", code="bulk-assign-partner")
+        status_new = LeadStatus.objects.create(code="BULK_ASSIGN_NEW", name="Bulk Assign New", is_default_for_new_leads=True)
+        lead_ids = []
+        for idx in range(3):
+            lead = Lead.objects.create(
+                partner=partner,
+                manager=old_manager,
+                status=status_new,
+                phone=f"+1555900{idx}",
+                custom_fields={},
+            )
+            lead_ids.append(lead.id)
+
+        NotificationPreference.objects.create(
+            user=watcher_admin,
+            event_type="lead_assigned",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.ALL,
+            repeat_minutes=15,
+            updated_by=watcher_admin,
+        )
+        NotificationPreference.objects.create(
+            user=watcher_admin,
+            event_type="lead_unassigned",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.ALL,
+            repeat_minutes=15,
+            updated_by=watcher_admin,
+        )
+
+        self.client.force_authenticate(user=actor_admin)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/v1/leads/records/bulk-assign-manager/",
+                {"lead_ids": lead_ids, "manager": new_manager.id, "reason": "bulk assign"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200)
+
+        assigned_notifications = Notification.objects.filter(recipient=watcher_admin, event_type="lead_assigned")
+        unassigned_notifications = Notification.objects.filter(recipient=watcher_admin, event_type="lead_unassigned")
+        self.assertEqual(assigned_notifications.count(), 1)
+        self.assertEqual(unassigned_notifications.count(), 1)
+
+        assigned = assigned_notifications.first()
+        unassigned = unassigned_notifications.first()
+        self.assertEqual(assigned.payload.get("mode"), "bulk_summary")
+        self.assertEqual(unassigned.payload.get("mode"), "bulk_summary")
+        self.assertEqual(assigned.payload.get("lead_count"), 3)
+        self.assertEqual(unassigned.payload.get("lead_count"), 3)
+        self.assertEqual(assigned.payload.get("status_counts", {}).get("BULK_ASSIGN_NEW"), 3)
+        self.assertEqual(unassigned.payload.get("status_counts", {}).get("BULK_ASSIGN_NEW"), 3)
+        self.assertFalse(assigned.payload.get("lead_ids_sample"))
+        self.assertFalse(unassigned.payload.get("lead_ids_sample"))
+        self.assertIsNone(assigned.lead_id)
+        self.assertIsNone(unassigned.lead_id)
+
     def test_emit_next_contact_overdue_notifications_repeats_by_slot_and_skips_contacted(self):
         manager = User.objects.create_user(username="notif_overdue_manager", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Overdue Partner", code="overdue-partner")
