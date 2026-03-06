@@ -37,7 +37,7 @@ Create `/opt/crm/crm/.env` from `.env.example` and set at least:
 cd /opt/crm/crm
 python3 -m venv .venv
 .venv/bin/pip install -U pip setuptools wheel
-# install project deps here (requirements/pyproject)
+.venv/bin/pip install -r requirements.txt
 .venv/bin/python manage.py migrate
 .venv/bin/python manage.py collectstatic --noinput
 .venv/bin/python manage.py check --deploy
