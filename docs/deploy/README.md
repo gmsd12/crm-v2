@@ -6,6 +6,7 @@
 - Python 3.12+, `venv`
 - Redis 6+
 - Nginx
+- Supervisor
 - TLS certificate (Let's Encrypt)
 - Frontend runtime: `bun` + `pm2` (for `crm-web`)
 
@@ -52,22 +53,24 @@ cd /opt/crm/crm
 .venv/bin/python manage.py createsuperuser
 ```
 
-## 4) Backend Processes (systemd)
+## 4) Backend Processes (supervisor + unix socket)
 
-Use templates from:
+Use templates/scripts:
 
-- `docs/deploy/systemd/crm-api.service`
-- `docs/deploy/systemd/crm-celery-worker.service`
-- `docs/deploy/systemd/crm-celery-beat.service`
+- `docs/deploy/supervisor/crm.conf.example`
+- `docs/deploy/scripts/setup_supervisor.sh`
 
 Install:
 
 ```bash
-sudo cp docs/deploy/systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now crm-api crm-celery-worker crm-celery-beat
-sudo systemctl status crm-api crm-celery-worker crm-celery-beat
+cd /opt/crm/crm
+sudo bash docs/deploy/scripts/setup_supervisor.sh
+sudo supervisorctl status
 ```
+
+`gunicorn` is started on unix socket:
+
+- `/run/crm/gunicorn.sock`
 
 ## 5) Frontend (crm-web) with PM2
 
@@ -99,6 +102,7 @@ Important:
 - Forward `X-Forwarded-Proto` header
 - Enable TLS
 - Serve `/static/` from `DJANGO_STATIC_ROOT` path
+- Proxy API via unix socket `/run/crm/gunicorn.sock`
 
 ## 7) Post-deploy checks
 
@@ -106,7 +110,7 @@ Important:
 - Login works, refresh works
 - Notifications stream works
 - Celery worker and beat are active
-- `systemctl status` is healthy for all services
+- `supervisorctl status` is healthy for all services
 
 ## 8) Backup minimum
 
