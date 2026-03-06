@@ -30,6 +30,10 @@ htmlcov/
 celerybeat-schedule
 .run/
 
+# Keep migrations local only
+**/migrations/*.py
+!**/migrations/__init__.py
+
 # Frontend artifacts (if present)
 node_modules/
 dist/
