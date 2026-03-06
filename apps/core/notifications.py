@@ -18,6 +18,7 @@ User = get_user_model()
 
 
 class NotificationEvent:
+    NEXT_CONTACT_PLANNED = "next_contact_planned"
     LEAD_ASSIGNED = "lead_assigned"
     LEAD_UNASSIGNED = "lead_unassigned"
     LEAD_STATUS_CHANGED = "lead_status_changed"
@@ -42,6 +43,14 @@ class NotificationEmitPayload:
 
 
 DEFAULT_POLICY_CONFIG = {
+    NotificationEvent.NEXT_CONTACT_PLANNED: {
+        "enabled_by_default": True,
+        "default_repeat_minutes": 15,
+        "default_watch_scope": NotificationPolicy.WatchScope.OWN,
+        "apply_to_teamleaders": True,
+        "apply_to_admins": True,
+        "apply_to_superusers": True,
+    },
     NotificationEvent.LEAD_ASSIGNED: {
         "enabled_by_default": True,
         "default_repeat_minutes": 15,
@@ -110,11 +119,31 @@ DEFAULT_POLICY_CONFIG = {
 _BROKER_HEALTH = {"checked_at": 0.0, "ok": False}
 
 
+def _format_human_datetime(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return timezone.localtime(value).strftime("%d-%m-%Y %H:%M")
+
+
+def _format_user_short(user) -> str:
+    if not user:
+        return ""
+    first_name = (getattr(user, "first_name", "") or "").strip()
+    last_name = (getattr(user, "last_name", "") or "").strip()
+    username = (getattr(user, "username", "") or "").strip()
+    if last_name and first_name:
+        return f"{first_name[0].upper()}. {last_name}"
+    if last_name:
+        return last_name
+    return username or f"пользователь {getattr(user, 'id', '')}"
+
+
 def event_types_for_user(*, user) -> list[str]:
     role = getattr(user, "role", None)
     if role in {UserRole.TEAMLEADER, UserRole.ADMIN, UserRole.SUPERUSER}:
         return list(DEFAULT_POLICY_CONFIG.keys())
     allowed = {
+        NotificationEvent.NEXT_CONTACT_PLANNED,
         NotificationEvent.LEAD_ASSIGNED,
         NotificationEvent.COMMENT_ADDED,
         NotificationEvent.NEXT_CONTACT_OVERDUE,
@@ -206,6 +235,10 @@ def deliver_notification(notification_id: int, *, now=None) -> bool:
         return False
     if notification.scheduled_for and notification.scheduled_for > now:
         return False
+    if notification.event_type == NotificationEvent.NEXT_CONTACT_PLANNED:
+        if not _can_deliver_next_contact_planned(notification=notification):
+            _cancel_notification(notification)
+            return False
     try:
         notification.mark_sent(at=now)
     except Exception as exc:
@@ -282,6 +315,7 @@ def emit_lead_assigned_notification(*, lead_id: int, to_manager_id: int, actor_u
         lead=lead,
         primary_recipient_ids=[to_manager_id],
     )
+    manager_label = _format_user_short(lead.manager) if lead.manager else "менеджер"
 
     created_notification = None
     for recipient in recipients:
@@ -294,7 +328,7 @@ def emit_lead_assigned_notification(*, lead_id: int, to_manager_id: int, actor_u
                 actor_user_id=actor_user_id,
                 lead_id=lead.id,
                 title=f"Назначен новый лид: {lead_label}",
-                body=f"Лид #{lead.id} назначен пользователю {lead.manager.username if lead.manager else 'менеджер'}",
+                body=f"Лид #{lead.id} назначен пользователю {manager_label}",
                 payload={
                     "lead_id": str(lead.id),
                     "from_manager_id": str(from_manager_id) if from_manager_id else None,
@@ -329,8 +363,8 @@ def emit_bulk_lead_assigned_notification(
     if sample_lead is None:
         return 0
 
-    to_manager = User.objects.filter(id=to_manager_id, is_active=True).only("id", "username").first()
-    to_manager_name = getattr(to_manager, "username", "") or f"пользователь {to_manager_id}"
+    to_manager = User.objects.filter(id=to_manager_id, is_active=True).only("id", "username", "first_name", "last_name").first()
+    to_manager_name = _format_user_short(to_manager) if to_manager else f"пользователь {to_manager_id}"
     changed_from_count = len({int(manager_id) for manager_id in (from_manager_ids or []) if manager_id})
     recipients = _resolve_lead_event_recipients(
         event_type=NotificationEvent.LEAD_ASSIGNED,
@@ -388,7 +422,7 @@ def emit_lead_unassigned_notification(
     if lead is None:
         return None
 
-    from_manager = User.objects.filter(id=from_manager_id, is_active=True).only("id", "username", "role").first()
+    from_manager = User.objects.filter(id=from_manager_id, is_active=True).only("id", "username", "first_name", "last_name", "role").first()
     manager_role = getattr(from_manager, "role", None)
     recipients = _resolve_lead_event_recipients(
         event_type=NotificationEvent.LEAD_UNASSIGNED,
@@ -401,7 +435,7 @@ def emit_lead_unassigned_notification(
         return None
 
     lead_label = (lead.full_name or lead.phone or f"Лид #{lead.id}").strip()
-    from_username = getattr(from_manager, "username", "") or "менеджер"
+    from_username = _format_user_short(from_manager) if from_manager else "менеджер"
     created_notification = None
     for recipient in recipients:
         dedupe_key = (
@@ -448,7 +482,7 @@ def emit_bulk_lead_unassigned_notification(
 
     managers = {
         manager.id: manager
-        for manager in User.objects.filter(id__in=grouped.keys(), is_active=True).only("id", "username", "role")
+        for manager in User.objects.filter(id__in=grouped.keys(), is_active=True).only("id", "username", "first_name", "last_name", "role")
     }
     sample_lead_ids = [lead_ids[0] for lead_ids in grouped.values() if lead_ids]
     leads_map = {
@@ -482,7 +516,7 @@ def emit_bulk_lead_unassigned_notification(
             (row.get("status_code") or "NO_STATUS"): int(row.get("count") or 0)
             for row in status_breakdown
         }
-        from_username = getattr(manager, "username", "") or f"пользователь {from_manager_id}"
+        from_username = _format_user_short(manager) if manager else f"пользователь {from_manager_id}"
         batch_key = batch_id or f"{from_manager_id}:{lead_count}:{sample_ids[0]}:{sample_ids[-1]}"
 
         for recipient in recipients:
@@ -913,8 +947,9 @@ def emit_next_contact_overdue_notifications(*, now=None, limit: int | None = Non
                     actor_user_id=None,
                     lead_id=lead.id,
                     title=f"Просрочен: {lead_label}",
-                    body=f"Следующий контакт просрочен с {lead.next_contact_at.isoformat()}",
+                    body=f"Следующий контакт просрочен с {_format_human_datetime(lead.next_contact_at)}",
                     payload={
+                        "notification_kind": "overdue",
                         "lead_id": str(lead.id),
                         "next_contact_at": lead.next_contact_at.isoformat() if lead.next_contact_at else None,
                         "slot": slot,
@@ -994,7 +1029,7 @@ def emit_manager_no_activity_notifications(*, now=None, threshold: int | None = 
                     recipient_id=recipient.id,
                     actor_user_id=None,
                     lead_id=None,
-                    title=f"Нет активности менеджера: {manager.username}",
+                    title=f"Нет активности менеджера: {_format_user_short(manager)}",
                     body=f"{overdue_count} просроченных лидов без контакта",
                     payload={
                         "manager_id": str(manager.id),
@@ -1103,34 +1138,115 @@ def emit_partner_duplicate_attempt_notification(*, attempt_id: int, now=None) ->
     return created
 
 
-def schedule_next_contact_overdue_notifications(*, lead_ids: list[int], delay_minutes: int = 0) -> int:
-    if not lead_ids:
-        return 0
-    delay_minutes = max(0, int(delay_minutes))
-    scheduled_for = timezone.now() + timedelta(minutes=delay_minutes)
-    leads = (
-        Lead.objects.select_related("manager")
-        .filter(id__in=lead_ids, is_deleted=False, manager__isnull=False, manager__is_active=True)
-        .order_by("id")
+def _cancel_notification(notification: Notification) -> None:
+    if notification.status == Notification.Status.CANCELLED:
+        return
+    notification.status = Notification.Status.CANCELLED
+    notification.save(update_fields=["status", "updated_at"])
+
+
+def _can_deliver_next_contact_planned(*, notification: Notification) -> bool:
+    lead = (
+        Lead.objects.select_related("manager", "status")
+        .filter(id=notification.lead_id, is_deleted=False, manager__isnull=False, manager__is_active=True)
+        .first()
     )
+    if lead is None or lead.next_contact_at is None:
+        return False
+    if lead.last_contacted_at and lead.last_contacted_at >= lead.next_contact_at:
+        return False
+    if lead.status_id is None or getattr(lead.status, "work_bucket", None) not in {
+        LeadStatus.WorkBucket.WORKING,
+        LeadStatus.WorkBucket.RETURN,
+    }:
+        return False
+
+    expected_next_contact_at = (notification.payload or {}).get("next_contact_at")
+    current_next_contact_at = lead.next_contact_at.isoformat()
+    if expected_next_contact_at and expected_next_contact_at != current_next_contact_at:
+        return False
+
+    recipients = _resolve_lead_event_recipients(
+        event_type=NotificationEvent.NEXT_CONTACT_PLANNED,
+        lead=lead,
+        primary_recipient_ids=[lead.manager_id] if lead.manager_id else [],
+    )
+    return any(recipient.id == notification.recipient_id for recipient in recipients)
+
+
+def reschedule_next_contact_planned_notifications(*, lead_id: int, remind_before_minutes: int = 15) -> int:
+    lead = (
+        Lead.objects.select_related("manager", "status")
+        .filter(id=lead_id)
+        .first()
+    )
+    if lead is None:
+        return 0
+
+    Notification.objects.filter(
+        event_type=NotificationEvent.NEXT_CONTACT_PLANNED,
+        lead_id=lead.id,
+        status=Notification.Status.PENDING,
+    ).delete()
+
+    if lead.is_deleted or lead.manager_id is None or lead.next_contact_at is None:
+        return 0
+    if lead.status_id is None or getattr(lead.status, "work_bucket", None) not in {
+        LeadStatus.WorkBucket.WORKING,
+        LeadStatus.WorkBucket.RETURN,
+    }:
+        return 0
+    if lead.last_contacted_at and lead.last_contacted_at >= lead.next_contact_at:
+        return 0
+
+    recipients = _resolve_lead_event_recipients(
+        event_type=NotificationEvent.NEXT_CONTACT_PLANNED,
+        lead=lead,
+        primary_recipient_ids=[lead.manager_id],
+    )
+    if not recipients:
+        return 0
+
+    now = timezone.now()
+    remind_before_minutes = max(0, int(remind_before_minutes))
+    scheduled_for = lead.next_contact_at - timedelta(minutes=remind_before_minutes)
+    if scheduled_for < now:
+        scheduled_for = now
+
+    lead_label = (lead.full_name or lead.phone or f"Лид #{lead.id}").strip()
+    next_contact_iso = lead.next_contact_at.isoformat()
     created = 0
-    for lead in leads:
-        if lead.manager_id is None:
-            continue
-        lead_label = (lead.full_name or lead.phone or f"Лид #{lead.id}").strip()
+    for recipient in recipients:
         notification = emit(
             NotificationEmitPayload(
-                event_type=NotificationEvent.NEXT_CONTACT_OVERDUE,
-                recipient_id=lead.manager_id,
+                event_type=NotificationEvent.NEXT_CONTACT_PLANNED,
+                recipient_id=recipient.id,
                 actor_user_id=None,
                 lead_id=lead.id,
-                title=f"Запланированное напоминание о контакте: {lead_label}",
-                body=f"Напоминание о контакте запланировано на {scheduled_for.isoformat()}",
-                payload={"lead_id": str(lead.id)},
-                dedupe_key=f"scheduled_next_contact:{lead.id}:{scheduled_for.isoformat()}",
+                title=f"Напоминание о контакте: {lead_label}",
+                body=f"Контакт запланирован на {_format_human_datetime(lead.next_contact_at)}",
+                payload={
+                    "notification_kind": "planned_reminder",
+                    "lead_id": str(lead.id),
+                    "next_contact_at": next_contact_iso,
+                    "remind_before_minutes": remind_before_minutes,
+                },
+                dedupe_key=f"planned_next_contact:{lead.id}:{recipient.id}:{next_contact_iso}",
                 scheduled_for=scheduled_for,
             )
         )
         if notification is not None:
             created += 1
+    return created
+
+
+def schedule_next_contact_overdue_notifications(*, lead_ids: list[int], delay_minutes: int = 0) -> int:
+    if not lead_ids:
+        return 0
+    created = 0
+    for lead_id in lead_ids:
+        created += reschedule_next_contact_planned_notifications(
+            lead_id=lead_id,
+            remind_before_minutes=max(0, int(delay_minutes or 15)),
+        )
     return created

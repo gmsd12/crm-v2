@@ -39,6 +39,7 @@ from apps.core.notifications import (
     emit_lead_assigned_notification,
     emit_lead_status_changed_notification,
     emit_lead_unassigned_notification,
+    reschedule_next_contact_planned_notifications,
 )
 from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from apps.leads.models import (
@@ -354,6 +355,25 @@ def _assert_deposit_create_allowed(*, actor_user, lead: Lead, manual_type: bool)
             raise PermissionDenied("RET может создавать депозиты только для своих лидов")
         return
     raise PermissionDenied("Вы не можете создавать депозиты для этого лида")
+
+
+def _filter_deposits_visible_for_user(*, actor_user, queryset, include_teamleader_self: bool = True):
+    role = getattr(actor_user, "role", None)
+    if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
+        return queryset
+    if role == UserRole.MANAGER:
+        return queryset.filter(creator_id=actor_user.id)
+    if role == UserRole.RET:
+        return queryset.filter(creator_id=actor_user.id)
+    if role == UserRole.TEAMLEADER:
+        if include_teamleader_self:
+            return queryset.filter(
+                Q(creator_id=actor_user.id)
+                | Q(creator__role=UserRole.MANAGER)
+                | Q(creator__role=UserRole.TEAMLEADER)
+            )
+        return queryset.filter(creator__role=UserRole.MANAGER)
+    return queryset.none()
 
 
 def _create_lead_deposit(
@@ -1378,15 +1398,14 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         role = getattr(self.request.user, "role", None)
-        if role == UserRole.MANAGER:
+        if self.action in {"list", "stats_monthly", "stats_ftd_matrix"} and role == UserRole.RET:
             return queryset.filter(creator_id=self.request.user.id)
-        if role == UserRole.RET:
-            return queryset.filter(Q(creator_id=self.request.user.id) | Q(creator__role=UserRole.MANAGER))
-        if role == UserRole.TEAMLEADER:
-            if self.action in {"list", "retrieve"}:
-                return queryset.filter(creator__role__in=[UserRole.MANAGER, UserRole.TEAMLEADER])
-            return queryset.filter(creator__role=UserRole.MANAGER)
-        return queryset
+        include_teamleader_self = self.action in {"list", "retrieve"}
+        return _filter_deposits_visible_for_user(
+            actor_user=self.request.user,
+            queryset=queryset,
+            include_teamleader_self=include_teamleader_self,
+        )
 
     def get_serializer_class(self):
         if self.action in {"create", "update", "partial_update"}:
@@ -1463,8 +1482,14 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def _amount_string(value) -> str:
         return f"{(value or 0):.2f}"
 
+    def _assert_metrics_access_allowed(self):
+        role = getattr(self.request.user, "role", None)
+        if role in {UserRole.MANAGER, UserRole.RET}:
+            raise PermissionDenied("У вас нет доступа к метрикам")
+
     @action(detail=False, methods=["get"], url_path="stats/monthly")
     def stats_monthly(self, request):
+        self._assert_metrics_access_allowed()
         queryset, params = self._get_stats_queryset(request.query_params)
         rows = list(
             queryset.annotate(month=TruncMonth("created_at"))
@@ -1526,6 +1551,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="stats/ftd-matrix")
     def stats_ftd_matrix(self, request):
+        self._assert_metrics_access_allowed()
         queryset, params = self._get_stats_queryset(request.query_params)
         rows = list(
             queryset.filter(type=LeadDeposit.Type.FTD)
@@ -2209,6 +2235,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         _set_first_manager_if_needed(lead, update_fields=post_save_updates)
         if post_save_updates:
             lead.save(update_fields=sorted(set(post_save_updates + ["updated_at"])))
+        if lead.next_contact_at is not None:
+            transaction.on_commit(
+                lambda lead_id=lead.id: reschedule_next_contact_planned_notifications(lead_id=lead_id, remind_before_minutes=15)
+            )
         _log_status_audit(
             event_type=LeadAuditEvent.LEAD_CREATED,
             actor_user=request.user,
@@ -2226,6 +2256,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         self._assert_can_edit(lead)
         self._assert_update_payload_allowed(lead)
         before = _lead_payload(lead)
+        before_next_contact_at = lead.next_contact_at
         serializer = self.get_serializer(lead, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         lead = serializer.save()
@@ -2233,6 +2264,10 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         _set_first_manager_if_needed(lead, update_fields=post_save_updates)
         if post_save_updates:
             lead.save(update_fields=sorted(set(post_save_updates + ["updated_at"])))
+        if before_next_contact_at != lead.next_contact_at:
+            transaction.on_commit(
+                lambda lead_id=lead.id: reschedule_next_contact_planned_notifications(lead_id=lead_id, remind_before_minutes=15)
+            )
         _log_status_audit(
             event_type=LeadAuditEvent.LEAD_UPDATED,
             actor_user=request.user,
@@ -2520,6 +2555,9 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
+        requester_role = getattr(request.user, "role", None)
+        if requester_role in {UserRole.MANAGER, UserRole.RET}:
+            raise PermissionDenied("У вас нет доступа к метрикам")
         if "manager" in request.query_params:
             raise serializers.ValidationError({"manager": "Фильтр manager не поддерживается в этом эндпоинте"})
         query = LeadFunnelMetricsQuerySerializer(data=request.query_params)
@@ -2536,7 +2574,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         partner = query.validated_data.get("partner")
         group_by = query.validated_data.get("group_by")
-        requester_role = getattr(request.user, "role", None)
         manager_scope = request.user if requester_role in {UserRole.MANAGER, UserRole.RET} else None
 
         leads_received_qs = Lead.objects.filter(received_at__gte=period_start, received_at__lt=period_end)
@@ -2546,6 +2583,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             leads_received_qs = leads_received_qs.filter(first_manager=manager_scope)
 
         valid_status_filter = Q(status__is_valid=True)
+        won_status_filter = Q(status__conversion_bucket=LeadStatus.ConversionBucket.WON)
         lost_status_filter = Q(status__conversion_bucket=LeadStatus.ConversionBucket.LOST)
         working_status_filter = Q(status__work_bucket=LeadStatus.WorkBucket.WORKING)
         return_status_filter = Q(status__work_bucket=LeadStatus.WorkBucket.RETURN)
@@ -2587,6 +2625,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             )
             valid_count = partner_leads_received_qs.filter(valid_status_filter).count()
             invalid_count = max(total - valid_count, 0)
+            won_status_count = partner_leads_received_qs.filter(won_status_filter).count()
             won_count = partner_ftd_qs.values("lead_id").distinct().count()
             lost_count = partner_leads_received_qs.filter(lost_status_filter).count()
             working_count = partner_leads_received_qs.filter(working_status_filter).count()
@@ -2620,7 +2659,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             valid_rate = _rate(valid_count, total)
             invalid_rate = _rate(invalid_count, total)
-            won_rate = _rate(won_count, total)
+            won_rate = _rate(won_status_count, total)
             lost_rate = _rate(lost_count, total)
             working_rate = _rate(working_count, total)
             return_rate = _rate(return_count, total)
@@ -2674,7 +2713,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                     "invalid_total": invalid_count,
                     "invalid_rate": invalid_rate,
                     "invalid_percent": _percent(invalid_rate),
-                    "won_total": won_count,
+                    "won_total": won_status_count,
                     "won_rate": won_rate,
                     "won_percent": _percent(won_rate),
                     "lost_total": lost_count,
