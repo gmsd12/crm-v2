@@ -21,6 +21,7 @@ Create `/opt/crm/crm/.env` from `.env.example` and set at least:
 - `DJANGO_DEBUG=false`
 - `DJANGO_ALLOWED_HOSTS=<api-domain>,<server-ip>`
 - `DATABASE_URL=<postgres://...>` (recommended)
+- `DJANGO_STATIC_ROOT=/opt/crm/crm/staticfiles`
 - `CORS_ALLOWED_ORIGINS=https://<frontend-domain>`
 - `CSRF_TRUSTED_ORIGINS=https://<frontend-domain>`
 - `JWT_REFRESH_COOKIE_SECURE=true`
@@ -38,6 +39,7 @@ cd /opt/crm/crm
 python3 -m venv .venv
 .venv/bin/pip install -U pip setuptools wheel
 .venv/bin/pip install -r requirements.txt
+mkdir -p /opt/crm/crm/staticfiles
 .venv/bin/python manage.py migrate
 .venv/bin/python manage.py collectstatic --noinput
 .venv/bin/python manage.py check --deploy
@@ -96,6 +98,7 @@ Important:
 - Keep SSE buffering disabled on `/api/v1/notifications/stream/`
 - Forward `X-Forwarded-Proto` header
 - Enable TLS
+- Serve `/static/` from `DJANGO_STATIC_ROOT` path
 
 ## 7) Post-deploy checks
 

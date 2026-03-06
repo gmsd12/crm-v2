@@ -160,6 +160,7 @@ USE_TZ = env.bool("DJANGO_USE_TZ", default=True)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = env("DJANGO_STATIC_ROOT", default=str(BASE_DIR / "staticfiles"))
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
