@@ -1,0 +1,16 @@
+[Unit]
+Description=CRM Celery Worker
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/crm/crm
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/crm/crm/.venv/bin/celery -A config worker -l info
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

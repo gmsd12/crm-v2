@@ -1,0 +1,16 @@
+[Unit]
+Description=CRM Django API (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/crm/crm
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/crm/crm/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

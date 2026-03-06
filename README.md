@@ -44,3 +44,10 @@ Backend for CRM v2 with:
 - Partner lead list endpoint uses pagination (`page`, `page_size`).
 - Partner token requests are rate-limited by token id.
 - Refresh tokens are rotated and blacklisted after rotation/logout.
+
+## Production deploy
+
+- See deployment runbook and templates in `docs/deploy/`:
+  - `docs/deploy/README.md`
+  - `docs/deploy/nginx.crm.example.conf`
+  - `docs/deploy/systemd/*.service`
