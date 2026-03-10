@@ -53,14 +53,39 @@ cd /opt/crm/crm
 .venv/bin/python manage.py createsuperuser
 ```
 
-## 4) Backend Processes (supervisor + unix socket)
+## 4) Config Layout
 
-Use templates/scripts:
+Canonical rule:
 
-- `docs/deploy/supervisor/crm.conf.example`
-- `docs/deploy/scripts/setup_supervisor.sh`
+- Templates live in the repo under `docs/deploy/`
+- Active configs live in `/etc/...`
+- Runtime-only files live in `/run/...`
+- Edit the repo template first, then copy/apply it to the system path, then reload the service
 
-Install:
+Canonical backend config map:
+
+| Purpose | Repo template | Active system path |
+|---|---|---|
+| supervisor main config | `docs/deploy/supervisor/supervisord.conf.example` | `/etc/supervisor/supervisord.conf` |
+| API process | `docs/deploy/supervisor/conf.d/crm-api.conf.example` | `/etc/supervisor/conf.d/crm-api.conf` |
+| Celery worker | `docs/deploy/supervisor/conf.d/crm_celery_worker.conf.example` | `/etc/supervisor/conf.d/crm_celery_worker.conf` |
+| Celery beat | `docs/deploy/supervisor/conf.d/crm_celery_beat.conf.example` | `/etc/supervisor/conf.d/crm_celery_beat.conf` |
+| runtime socket dir | `docs/deploy/tmpfiles/crm.conf` | `/etc/tmpfiles.d/crm.conf` |
+| nginx site | `docs/deploy/nginx.crm.example.conf` | `/etc/nginx/sites-available/crm.conf` and `/etc/nginx/sites-enabled/crm.conf` |
+
+Runtime path:
+
+- API unix socket: `/run/crm/gunicorn.sock`
+
+Notes:
+
+- `/run/crm/gunicorn.sock` is not stored in git and is not copied manually; it is created at runtime by gunicorn
+- `/run/crm` must exist before the API starts, so keep `/etc/tmpfiles.d/crm.conf`
+- `supervisor` is the only supported production process manager for this project
+
+## 5) Backend Processes (supervisor + unix socket)
+
+Install/update canonical supervisor files:
 
 ```bash
 cd /opt/crm/crm
@@ -68,11 +93,11 @@ sudo bash docs/deploy/scripts/setup_supervisor.sh
 sudo supervisorctl status
 ```
 
-`gunicorn` is started in ASGI mode (`config.asgi:application` + `uvicorn.workers.UvicornWorker`) on unix socket:
+`gunicorn` runs in ASGI mode (`config.asgi:application` + `uvicorn_worker.UvicornWorker`) and binds to:
 
-- `/run/crm/gunicorn.sock`
+- `unix:/run/crm/gunicorn.sock`
 
-## 5) Frontend (crm-web) with PM2
+## 6) Frontend (crm-web) with PM2
 
 ```bash
 cd /opt/crm/crm-web
@@ -90,11 +115,21 @@ Required frontend env (`/opt/crm/crm-web/.env`):
 - `NUXT_PUBLIC_API_BASE=https://<api-domain>`
 - `NUXT_PUBLIC_SSE_URL=https://<api-domain>/api/v1/notifications/stream/`
 
-## 6) Nginx
+## 7) Nginx
 
-Use template:
+Use canonical paths:
 
-- `docs/deploy/nginx.crm.example.conf`
+- repo template: `docs/deploy/nginx.crm.example.conf`
+- active files: `/etc/nginx/sites-available/crm.conf`, `/etc/nginx/sites-enabled/crm.conf`
+
+Apply:
+
+```bash
+sudo cp docs/deploy/nginx.crm.example.conf /etc/nginx/sites-available/crm.conf
+sudo ln -sf /etc/nginx/sites-available/crm.conf /etc/nginx/sites-enabled/crm.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
 
 Important:
 
@@ -104,21 +139,38 @@ Important:
 - Serve `/static/` from `DJANGO_STATIC_ROOT` path
 - Proxy API via unix socket `/run/crm/gunicorn.sock`
 
-## 7) Post-deploy checks
+## 8) Post-deploy checks
 
 - `GET https://<api-domain>/api/health/` returns `{"status":"ок"}`
 - Login works, refresh works
 - Notifications stream works
 - Celery worker and beat are active
 - `supervisorctl status` is healthy for all services
+- `ps -ef | grep gunicorn` shows `config.asgi:application`
+- `grep -R "/run/crm/gunicorn.sock" /etc/nginx/sites-enabled/crm.conf /etc/supervisor/conf.d/crm-api.conf` matches both files
 
-## 8) Backup minimum
+## 9) Backup minimum
 
 - DB backup schedule (daily + retention)
 - Media directory backup (`/opt/crm/crm/media`)
 - `.env` secure copy in secret manager/vault
 
-## 9) Recommended hardening
+## 10) Config Update Workflow
+
+When you change deploy config, use this order:
+
+1. Edit the template in `docs/deploy/...`
+2. Copy the template into the matching `/etc/...` path
+3. Reload the owning service:
+   - `supervisorctl reread && supervisorctl update` for `supervisor`
+   - `systemctl reload nginx` for `nginx`
+   - `systemd-tmpfiles --create /etc/tmpfiles.d/crm.conf` after tmpfiles changes
+4. Verify with `supervisorctl status`, `nginx -t`, and `/api/health/`
+
+Do not treat `/run/crm/gunicorn.sock` as a config file.
+It is a runtime artifact created by gunicorn and recreated after restart/reboot.
+
+## 11) Recommended hardening
 
 - Fail2ban + UFW
 - Restrict DB/Redis to private network only

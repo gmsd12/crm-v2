@@ -50,5 +50,9 @@ Backend for CRM v2 with:
 - See deployment runbook and templates in `docs/deploy/`:
   - `docs/deploy/README.md`
   - `docs/deploy/nginx.crm.example.conf`
-  - `docs/deploy/supervisor/crm.conf.example`
+  - `docs/deploy/supervisor/supervisord.conf.example`
+  - `docs/deploy/supervisor/conf.d/crm-api.conf.example`
+  - `docs/deploy/supervisor/conf.d/crm_celery_worker.conf.example`
+  - `docs/deploy/supervisor/conf.d/crm_celery_beat.conf.example`
+  - `docs/deploy/tmpfiles/crm.conf`
   - `docs/deploy/scripts/setup_supervisor.sh`

@@ -1,0 +1,12 @@
+[program:crm_api]
+directory=/opt/crm/crm
+command=/opt/crm/crm/.venv/bin/gunicorn config.asgi:application -k uvicorn_worker.UvicornWorker --workers 3 --bind unix:/run/crm/gunicorn.sock --timeout 120 --access-logfile - --error-logfile -
+user=www-data
+autostart=true
+autorestart=true
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/supervisor/crm_api.log
+stderr_logfile=/var/log/supervisor/crm_api.err.log
+environment=PYTHONUNBUFFERED="1"

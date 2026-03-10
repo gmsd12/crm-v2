@@ -1,0 +1,12 @@
+[program:crm_celery_worker]
+directory=/opt/crm/crm
+command=/opt/crm/crm/.venv/bin/celery -A config worker -l info
+user=www-data
+autostart=true
+autorestart=true
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/supervisor/crm_celery_worker.log
+stderr_logfile=/var/log/supervisor/crm_celery_worker.err.log
+environment=PYTHONUNBUFFERED="1"
