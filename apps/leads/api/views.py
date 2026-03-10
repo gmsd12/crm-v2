@@ -1393,6 +1393,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "retrieve": (Perm.LEADS_READ,),
         "stats_monthly": (Perm.LEADS_READ,),
         "stats_ftd_matrix": (Perm.LEADS_READ,),
+        "stats_non_ftd_matrix": (Perm.LEADS_READ,),
         "create": (Perm.LEADS_WRITE,),
         "update": (Perm.LEADS_WRITE,),
         "partial_update": (Perm.LEADS_WRITE,),
@@ -1404,7 +1405,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         role = getattr(self.request.user, "role", None)
-        if self.action in {"list", "stats_monthly", "stats_ftd_matrix"} and role == UserRole.RET:
+        if self.action in {"list", "stats_monthly", "stats_ftd_matrix", "stats_non_ftd_matrix"} and role == UserRole.RET:
             return queryset.filter(creator_id=self.request.user.id)
         include_teamleader_self = self.action in {"list", "retrieve"}
         return _filter_deposits_visible_for_user(
@@ -1608,6 +1609,99 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
             row_map.values(),
             key=lambda item: (-item["total_ftd"], item["user"]["username"] or "", item["user"]["id"]),
         )
+
+        return Response(
+            {
+                "period": {
+                    "date_from": params.get("date_from").isoformat() if params.get("date_from") else None,
+                    "date_to": params.get("date_to").isoformat() if params.get("date_to") else None,
+                },
+                "columns": columns,
+                "rows": matrix_rows,
+            }
+        )
+
+    @action(detail=False, methods=["get"], url_path="stats/non-ftd-matrix")
+    def stats_non_ftd_matrix(self, request):
+        self._assert_metrics_access_allowed()
+        queryset, params = self._get_stats_queryset(request.query_params)
+        rows = list(
+            queryset.filter(type__in=[LeadDeposit.Type.RELOAD, LeadDeposit.Type.DEPOSIT])
+            .annotate(month=TruncMonth("created_at"))
+            .values(
+                "creator_id",
+                "creator__username",
+                "creator__first_name",
+                "creator__last_name",
+                "creator__role",
+                "month",
+            )
+            .annotate(
+                reload_count=Count("id", filter=Q(type=LeadDeposit.Type.RELOAD)),
+                deposit_count=Count("id", filter=Q(type=LeadDeposit.Type.DEPOSIT)),
+                total_amount=Sum("amount"),
+            )
+            .order_by("creator__username", "creator_id", "month")
+        )
+
+        month_keys = self._month_range(
+            params.get("date_from"),
+            params.get("date_to"),
+            [row["month"] for row in rows if row["month"] is not None],
+        )
+        columns = [self._month_payload(month_start) for month_start in month_keys]
+        default_cells = {
+            column["month_key"]: {"reload_count": 0, "deposit_count": 0, "total_amount": self._amount_string(0)}
+            for column in columns
+        }
+
+        row_map: dict[int, dict] = {}
+        for row in rows:
+            creator_id = row["creator_id"]
+            if creator_id is None or row["month"] is None:
+                continue
+            if creator_id not in row_map:
+                row_map[creator_id] = {
+                    "user": {
+                        "id": str(creator_id),
+                        "username": row["creator__username"],
+                        "first_name": (row["creator__first_name"] or "").strip(),
+                        "last_name": (row["creator__last_name"] or "").strip(),
+                        "role": row["creator__role"],
+                    },
+                    "total": {
+                        "reload_count": 0,
+                        "deposit_count": 0,
+                        "total_amount": self._amount_string(0),
+                    },
+                    "cells": {month_key: cell.copy() for month_key, cell in default_cells.items()},
+                    "_total_amount_value": 0,
+                }
+            month_key = row["month"].date().replace(day=1).strftime("%Y-%m")
+            reload_count = int(row["reload_count"] or 0)
+            deposit_count = int(row["deposit_count"] or 0)
+            total_amount = row["total_amount"] or 0
+            row_map[creator_id]["cells"][month_key] = {
+                "reload_count": reload_count,
+                "deposit_count": deposit_count,
+                "total_amount": self._amount_string(total_amount),
+            }
+            row_map[creator_id]["total"]["reload_count"] += reload_count
+            row_map[creator_id]["total"]["deposit_count"] += deposit_count
+            row_map[creator_id]["_total_amount_value"] += total_amount
+            row_map[creator_id]["total"]["total_amount"] = self._amount_string(row_map[creator_id]["_total_amount_value"])
+
+        matrix_rows = sorted(
+            row_map.values(),
+            key=lambda item: (
+                -item["_total_amount_value"],
+                -(item["total"]["reload_count"] + item["total"]["deposit_count"]),
+                item["user"]["username"] or "",
+                item["user"]["id"],
+            ),
+        )
+        for row in matrix_rows:
+            row.pop("_total_amount_value", None)
 
         return Response(
             {

@@ -28,7 +28,7 @@ from apps.leads.models import (
     LeadIdempotencyEndpoint,
     LeadIdempotencyKey,
 )
-from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.models import Partner, PartnerToken
 
 User = get_user_model()
 
@@ -3353,8 +3353,8 @@ class LeadStatusCatalogApiTests(APITestCase):
     def test_manager_cannot_update_protected_fields_on_own_lead(self):
         manager = User.objects.create_user(username="manager_protected_fields", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Protected", code="partner-protected")
-        source_a = PartnerSource.objects.create(partner=partner, code="google", name="Google")
-        source_b = PartnerSource.objects.create(partner=partner, code="fb", name="Facebook")
+        source_a = "google"
+        source_b = "fb"
         lead = Lead.objects.create(
             partner=partner,
             manager=manager,
@@ -3372,7 +3372,7 @@ class LeadStatusCatalogApiTests(APITestCase):
                 "full_name": "After",
                 "phone": "+2222",
                 "email": "after@example.com",
-                "source": str(source_b.id),
+                "source": source_b,
                 "partner": str(partner.id),
             },
             format="json",
@@ -3384,14 +3384,14 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.full_name, "Before")
         self.assertEqual(lead.phone, "+1111")
         self.assertEqual(lead.email, "before@example.com")
-        self.assertEqual(lead.source_id, source_a.id)
+        self.assertEqual(lead.source, source_a)
 
     def test_admin_cannot_update_sensitive_partner_fields(self):
         admin = User.objects.create_user(username="admin_sensitive_fields", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Admin Sensitive", code="partner-admin-sensitive")
         partner_other = Partner.objects.create(name="Partner Admin Sensitive Other", code="partner-admin-sensitive-other")
-        source_a = PartnerSource.objects.create(partner=partner, code="google-admin", name="Google Admin")
-        source_b = PartnerSource.objects.create(partner=partner_other, code="meta-admin", name="Meta Admin")
+        source_a = "google-admin"
+        source_b = "meta-admin"
         lead = Lead.objects.create(
             partner=partner,
             source=source_a,
@@ -3409,7 +3409,7 @@ class LeadStatusCatalogApiTests(APITestCase):
                 "full_name": "Changed Name",
                 "phone": "+15550002",
                 "email": "changed@example.com",
-                "source": str(source_b.id),
+                "source": source_b,
                 "partner": str(partner_other.id),
                 "geo": "CH",
             },
@@ -3423,7 +3423,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.phone, "+15550001")
         self.assertEqual(lead.email, "original@example.com")
         self.assertEqual(lead.partner_id, partner.id)
-        self.assertEqual(lead.source_id, source_a.id)
+        self.assertEqual(lead.source, source_a)
         self.assertEqual(lead.geo, "RU")
 
     def test_superuser_can_update_sensitive_partner_fields(self):
@@ -3436,8 +3436,8 @@ class LeadStatusCatalogApiTests(APITestCase):
         )
         partner = Partner.objects.create(name="Partner SU Sensitive", code="partner-su-sensitive")
         partner_other = Partner.objects.create(name="Partner SU Sensitive Other", code="partner-su-sensitive-other")
-        source_a = PartnerSource.objects.create(partner=partner, code="google-su", name="Google SU")
-        source_b = PartnerSource.objects.create(partner=partner_other, code="meta-su", name="Meta SU")
+        source_a = "google-su"
+        source_b = "meta-su"
         lead = Lead.objects.create(
             partner=partner,
             source=source_a,
@@ -3455,7 +3455,7 @@ class LeadStatusCatalogApiTests(APITestCase):
                 "full_name": "Updated SU",
                 "phone": "+16660002",
                 "email": "updated-su@example.com",
-                "source": str(source_b.id),
+                "source": source_b,
                 "partner": str(partner_other.id),
                 "geo": "ch",
             },
@@ -3468,7 +3468,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(lead.phone, "+16660002")
         self.assertEqual(lead.email, "updated-su@example.com")
         self.assertEqual(lead.partner_id, partner_other.id)
-        self.assertEqual(lead.source_id, source_b.id)
+        self.assertEqual(lead.source, source_b)
         self.assertEqual(lead.geo, "CH")
 
     def test_manager_cannot_update_foreign_lead(self):
@@ -4255,7 +4255,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             ],
         )
 
-    def test_deposit_stats_ftd_matrix_respects_creator_scope_for_manager(self):
+    def test_deposit_stats_ftd_matrix_is_forbidden_for_manager(self):
         manager = User.objects.create_user(username="manager_dep_stats_matrix", password="pass12345", role=UserRole.MANAGER)
         other_manager = User.objects.create_user(
             username="manager_dep_stats_matrix_other",
@@ -4280,6 +4280,71 @@ class LeadStatusCatalogApiTests(APITestCase):
             "/api/v1/leads/deposits/stats/ftd-matrix/?date_from=2026-01-01&date_to=2026-02-28"
         )
 
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_deposit_stats_non_ftd_matrix_aggregates_reload_deposit_and_amount(self):
+        admin = User.objects.create_user(username="admin_dep_non_ftd_matrix", password="pass12345", role=UserRole.ADMIN)
+        ivan = User.objects.create_user(username="ivan_dep_non_ftd", password="pass12345", role=UserRole.RET)
+        nina = User.objects.create_user(username="nina_dep_non_ftd", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(name="Partner Deposit Non FTD Matrix", code="partner-deposit-non-ftd-matrix")
+
+        lead_ivan = Lead.objects.create(partner=partner, manager=ivan, phone="+19991221", custom_fields={})
+        lead_nina = Lead.objects.create(partner=partner, manager=nina, phone="+19991222", custom_fields={})
+
+        ivan_reload_feb = LeadDeposit.objects.create(
+            lead=lead_ivan,
+            creator=ivan,
+            amount="40.00",
+            type=LeadDeposit.Type.RELOAD,
+        )
+        ivan_deposit_feb = LeadDeposit.objects.create(
+            lead=lead_ivan,
+            creator=ivan,
+            amount="25.00",
+            type=LeadDeposit.Type.DEPOSIT,
+        )
+        ivan_deposit_jan = LeadDeposit.objects.create(
+            lead=lead_ivan,
+            creator=ivan,
+            amount="35.00",
+            type=LeadDeposit.Type.DEPOSIT,
+        )
+        nina_deposit_feb = LeadDeposit.objects.create(
+            lead=lead_nina,
+            creator=nina,
+            amount="70.00",
+            type=LeadDeposit.Type.DEPOSIT,
+        )
+        # FTD не должен попадать в матрицу non-FTD.
+        nina_ftd_feb = LeadDeposit.objects.create(
+            lead=lead_nina,
+            creator=nina,
+            amount="100.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        # soft-deleted не должен попадать в агрегацию.
+        deleted_dep = LeadDeposit.objects.create(
+            lead=lead_nina,
+            creator=nina,
+            amount="500.00",
+            type=LeadDeposit.Type.DEPOSIT,
+        )
+        deleted_dep.delete()
+
+        self._set_deposit_created_at(ivan_reload_feb, timezone.make_aware(datetime(2026, 2, 10, 10, 0, 0)))
+        self._set_deposit_created_at(ivan_deposit_feb, timezone.make_aware(datetime(2026, 2, 11, 10, 0, 0)))
+        self._set_deposit_created_at(ivan_deposit_jan, timezone.make_aware(datetime(2026, 1, 11, 10, 0, 0)))
+        self._set_deposit_created_at(nina_deposit_feb, timezone.make_aware(datetime(2026, 2, 12, 10, 0, 0)))
+        self._set_deposit_created_at(nina_ftd_feb, timezone.make_aware(datetime(2026, 2, 13, 10, 0, 0)))
+        LeadDeposit.all_objects.filter(id=deleted_dep.id).update(
+            created_at=timezone.make_aware(datetime(2026, 2, 14, 10, 0, 0))
+        )
+
+        self._auth(admin)
+        response = self.client.get(
+            "/api/v1/leads/deposits/stats/non-ftd-matrix/?date_from=2026-01-01&date_to=2026-02-28"
+        )
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             response.data["columns"],
@@ -4288,11 +4353,59 @@ class LeadStatusCatalogApiTests(APITestCase):
                 {"year": 2026, "month": 1, "month_key": "2026-01", "month_label": "2026-01"},
             ],
         )
-        self.assertEqual(len(response.data["rows"]), 1)
-        row = response.data["rows"][0]
-        self.assertEqual(row["user"]["id"], str(manager.id))
-        self.assertEqual(row["total_ftd"], 1)
-        self.assertEqual(row["cells"], {"2026-01": 1, "2026-02": 0})
+        self.assertEqual(len(response.data["rows"]), 2)
+
+        ivan_row = next(row for row in response.data["rows"] if row["user"]["id"] == str(ivan.id))
+        self.assertEqual(
+            ivan_row["total"],
+            {
+                "reload_count": 1,
+                "deposit_count": 2,
+                "total_amount": "100.00",
+            },
+        )
+        self.assertEqual(
+            ivan_row["cells"]["2026-02"],
+            {
+                "reload_count": 1,
+                "deposit_count": 1,
+                "total_amount": "65.00",
+            },
+        )
+        self.assertEqual(
+            ivan_row["cells"]["2026-01"],
+            {
+                "reload_count": 0,
+                "deposit_count": 1,
+                "total_amount": "35.00",
+            },
+        )
+
+        nina_row = next(row for row in response.data["rows"] if row["user"]["id"] == str(nina.id))
+        self.assertEqual(
+            nina_row["total"],
+            {
+                "reload_count": 0,
+                "deposit_count": 1,
+                "total_amount": "70.00",
+            },
+        )
+        self.assertEqual(
+            nina_row["cells"]["2026-02"],
+            {
+                "reload_count": 0,
+                "deposit_count": 1,
+                "total_amount": "70.00",
+            },
+        )
+        self.assertEqual(
+            nina_row["cells"]["2026-01"],
+            {
+                "reload_count": 0,
+                "deposit_count": 0,
+                "total_amount": "0.00",
+            },
+        )
 
     def test_deposit_stats_default_to_current_year_when_dates_missing(self):
         admin = User.objects.create_user(username="admin_dep_stats_default_dates", password="pass12345", role=UserRole.ADMIN)
@@ -4490,7 +4603,7 @@ class LeadStatusCatalogApiTests(APITestCase):
 
     def test_partner_duplicate_attempt_is_saved_without_creating_new_lead(self):
         partner = Partner.objects.create(name="Partner Dup Attempt", code="partner-dup-attempt")
-        source = PartnerSource.objects.create(partner=partner, name="Google", code="google", is_active=True)
+        source = "google"
         raw_token = "tok_live_partner_dup_attempt_1234567890"
         token = PartnerToken.build(partner=partner, raw_token=raw_token, name="dup-attempt", source=source)
         token.save()
@@ -4621,7 +4734,7 @@ class LeadStatusCatalogApiTests(APITestCase):
         manager_a = User.objects.create_user(username="manager_ext_filter_a", password="pass12345", role=UserRole.MANAGER)
         manager_b = User.objects.create_user(username="manager_ext_filter_b", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Partner Extended Filters", code="partner-extended-filters")
-        source = PartnerSource.objects.create(partner=partner, name="Google", code="google-ext", is_active=True)
+        source = "google-ext"
         status_new = LeadStatus.objects.create(code="NEW_EXT_FILTER", name="New Ext", is_default_for_new_leads=True)
         status_won = LeadStatus.objects.create(
             code="WON_EXT_FILTER",
@@ -4668,7 +4781,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             "/api/v1/leads/records/",
             {
                 "partner__in": str(partner.id),
-                "source__in": str(source.id),
+                "source__in": source,
                 "manager__in": str(manager_a.id),
                 "first_manager__in": str(manager_a.id),
                 "status_code": "won_ext_filter",

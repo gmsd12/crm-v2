@@ -1,8 +1,15 @@
+from django_filters import DateRangeFilter
+
 from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from django import forms
 from django.contrib import admin
 from django.urls import reverse
 from django.utils.html import format_html
+
+try:
+    from rangefilter.filters import DateTimeRangeFilter
+except ImportError:  # pragma: no cover
+    DateTimeRangeFilter = None
 
 try:
     from import_export.admin import ExportActionMixin, ImportExportModelAdmin
@@ -235,26 +242,39 @@ class LeadTagAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
 class LeadAdmin(SoftDeleteAdminMixin, ExportActionMixin, ImportExportModelAdmin):
     list_display = (
         "id",
-        "partner",
         "full_name",
         "phone",
-        "manager",
-        "first_manager",
-        "priority",
-        "status",
-        "source",
-        "received_at",
-        "is_deleted",
-    )
-    list_filter = (
+        "email",
         "partner",
         "manager",
         "first_manager",
-        "priority",
         "status",
-        "source",
+        "received_at",
+        "last_contacted_at",
         "is_deleted",
     )
+    if DateTimeRangeFilter is not None:
+        list_filter = (
+            "partner",
+            "manager",
+            "first_manager",
+            "priority",
+            "status",
+            "source",
+            ("created_at", DateTimeRangeFilter),
+            "is_deleted",
+        )
+    else:
+        list_filter = (
+            "partner",
+            "manager",
+            "first_manager",
+            "priority",
+            "status__name",
+            "source",
+            "received_at",
+            "is_deleted",
+        )
     search_fields = (
         "full_name",
         "phone",

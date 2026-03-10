@@ -15,7 +15,7 @@ class Partner(BaseModel):
         db_table = "partners"
 
     def __str__(self) -> str:
-        return f"{self.name} ({self.code})"
+        return f"{self.name}"
 
 
 class PartnerToken(BaseModel):
