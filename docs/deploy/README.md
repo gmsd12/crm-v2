@@ -68,7 +68,7 @@ sudo bash docs/deploy/scripts/setup_supervisor.sh
 sudo supervisorctl status
 ```
 
-`gunicorn` is started on unix socket:
+`gunicorn` is started in ASGI mode (`config.asgi:application` + `uvicorn.workers.UvicornWorker`) on unix socket:
 
 - `/run/crm/gunicorn.sock`
 

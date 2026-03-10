@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Backend process setup for CRM:
-# - gunicorn on unix socket
+# - gunicorn (ASGI) on unix socket
 # - celery worker
 # - celery beat
 
@@ -39,7 +39,7 @@ echo "[3/5] Writing supervisor config: $SUPERVISOR_CONF"
 cat >"$SUPERVISOR_CONF" <<EOF
 [program:crm_api]
 directory=$APP_DIR
-command=$VENV_DIR/bin/gunicorn config.wsgi:application --workers $WORKERS --bind unix:$SOCKET_PATH --timeout 120 --access-logfile - --error-logfile -
+command=$VENV_DIR/bin/gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --workers $WORKERS --bind unix:$SOCKET_PATH --timeout 120 --access-logfile - --error-logfile -
 user=$RUN_USER
 autostart=true
 autorestart=true

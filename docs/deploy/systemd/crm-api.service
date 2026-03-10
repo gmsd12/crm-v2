@@ -1,5 +1,5 @@
 [Unit]
-Description=CRM Django API (gunicorn)
+Description=CRM Django API (gunicorn + ASGI)
 After=network.target
 
 [Service]
@@ -8,7 +8,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=/opt/crm/crm
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/crm/crm/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120
+ExecStart=/opt/crm/crm/.venv/bin/gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 127.0.0.1:8000 --workers 3 --timeout 120
 Restart=always
 RestartSec=3
 

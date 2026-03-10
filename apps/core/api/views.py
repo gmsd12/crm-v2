@@ -1,6 +1,7 @@
+import asyncio
 import json
-import time
 
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 from django_filters import rest_framework as django_filters
 from django_filters.rest_framework import DjangoFilterBackend
@@ -163,45 +164,86 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         once = (request.query_params.get("once") or "").strip().lower() in {"1", "true", "yes"}
 
         user_queryset = self.get_queryset()
+        user_id = request.user.id
 
-        def event_stream():
+        def event_stream_once():
             current_last_id = last_id
             unread_count = user_queryset.filter(is_read=False).count()
             yield self._sse_encode(event="unread_count", data={"unread_count": unread_count})
 
-            loop_count = 0
-            heartbeat_started = time.monotonic()
+            items = list(
+                user_queryset.filter(id__gt=current_last_id).order_by("id")[:50]
+            )
+            if items:
+                current_last_id = items[-1].id
+                payload = NotificationSerializer(items, many=True).data
+                yield self._sse_encode(event="notifications", data={"items": payload}, event_id=current_last_id)
+
+            fresh_unread = user_queryset.filter(is_read=False).count()
+            if fresh_unread != unread_count:
+                unread_count = fresh_unread
+                yield self._sse_encode(event="unread_count", data={"unread_count": unread_count})
+
+        async def event_stream_async():
+            current_last_id = last_id
+            unread_count = await sync_to_async(self._stream_unread_count, thread_sensitive=True)(user_id)
+            yield self._sse_encode(event="unread_count", data={"unread_count": unread_count})
+
+            heartbeat_started = asyncio.get_running_loop().time()
             while True:
                 try:
-                    items = list(
-                        user_queryset.filter(id__gt=current_last_id).order_by("id")[:50]
-                    )
-                    if items:
-                        current_last_id = items[-1].id
-                        payload = NotificationSerializer(items, many=True).data
+                    payload, new_last_id = await sync_to_async(
+                        self._stream_fetch_notifications, thread_sensitive=True
+                    )(user_id, current_last_id, 50)
+                    if payload:
+                        current_last_id = new_last_id
                         yield self._sse_encode(event="notifications", data={"items": payload}, event_id=current_last_id)
 
-                    fresh_unread = user_queryset.filter(is_read=False).count()
+                    fresh_unread = await sync_to_async(self._stream_unread_count, thread_sensitive=True)(user_id)
                     if fresh_unread != unread_count:
                         unread_count = fresh_unread
                         yield self._sse_encode(event="unread_count", data={"unread_count": unread_count})
 
-                    if time.monotonic() - heartbeat_started >= 15:
-                        heartbeat_started = time.monotonic()
+                    now = asyncio.get_running_loop().time()
+                    if now - heartbeat_started >= 15:
+                        heartbeat_started = now
                         yield ": ping\n\n"
 
-                    loop_count += 1
-                    if once and loop_count >= 1:
-                        break
-
-                    time.sleep(poll_interval)
-                except GeneratorExit:
+                    await asyncio.sleep(poll_interval)
+                except (asyncio.CancelledError, GeneratorExit):
                     break
 
-        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response = StreamingHttpResponse(
+            event_stream_once() if once else event_stream_async(),
+            content_type="text/event-stream",
+        )
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+    @staticmethod
+    def _stream_unread_count(user_id: int) -> int:
+        return Notification.objects.filter(
+            recipient_id=user_id,
+            status=Notification.Status.SENT,
+            is_read=False,
+        ).count()
+
+    @staticmethod
+    def _stream_fetch_notifications(user_id: int, current_last_id: int, limit: int) -> tuple[list[dict], int]:
+        items = list(
+            Notification.objects.select_related("actor_user", "lead", "recipient")
+            .filter(
+                recipient_id=user_id,
+                status=Notification.Status.SENT,
+                id__gt=current_last_id,
+            )
+            .order_by("id")[:limit]
+        )
+        if not items:
+            return [], current_last_id
+        payload = NotificationSerializer(items, many=True).data
+        return payload, items[-1].id
 
 
 class NotificationPolicyViewSet(viewsets.ModelViewSet):
