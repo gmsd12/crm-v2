@@ -6,11 +6,11 @@ from .models import User
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
     model = User
-    ordering = ("username",)
-    list_display = ("username", "last_name", "role", "is_active", "is_staff", "is_superuser")
+    ordering = ("role","last_name")
+    list_display = ("id","last_name", "first_name", "role", "username", "is_active", "is_staff", "is_superuser")
     list_filter = ("role", "is_active", "is_staff", "is_superuser")
-    search_fields = ("username","last_name",)
-    list_editable = ('role',)
+    search_fields = ("username", "first_name", "last_name")
+    list_editable = ("role","is_active")
 
     # Убираем email/first_name/last_name из форм админки
     fieldsets = (
@@ -21,8 +21,21 @@ class UserAdmin(DjangoUserAdmin):
     )
 
     add_fieldsets = (
-        (None, {
-            "classes": ("wide",),
-            "fields": ("username", "password1", "password2", "role", "is_active", "is_staff", "is_superuser"),
-        }),
+        (
+            None,
+            {
+                "classes": ("wide",),
+                "fields": (
+                    "username",
+                    "first_name",
+                    "last_name",
+                    "password1",
+                    "password2",
+                    "role",
+                    "is_active",
+                    "is_staff",
+                    "is_superuser",
+                ),
+            },
+        ),
     )

@@ -5,7 +5,7 @@ import re
 from django.utils import timezone
 from rest_framework import serializers
 from apps.core.notifications import emit_partner_duplicate_attempt_notification
-from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.models import Partner, PartnerToken
 from apps.leads.models import (
     Lead,
     LeadAuditEntity,
@@ -34,40 +34,8 @@ class PartnerAdminSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
-class PartnerSourceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PartnerSource
-        fields = ["id", "name", "code", "is_active"]
-
-
-class PartnerSourceAdminSerializer(serializers.ModelSerializer):
-    partner_code = serializers.CharField(source="partner.code", read_only=True)
-    partner_name = serializers.CharField(source="partner.name", read_only=True)
-
-    class Meta:
-        model = PartnerSource
-        fields = [
-            "id",
-            "partner",
-            "partner_code",
-            "partner_name",
-            "name",
-            "code",
-            "is_active",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "partner_code", "partner_name", "created_at", "updated_at"]
-        extra_kwargs = {
-            "partner": {"queryset": Partner.objects.all()},
-            "name": {"required": True},
-            "code": {"required": True},
-        }
-
-
 class PartnerTokenAdminSerializer(serializers.ModelSerializer):
     partner_code = serializers.CharField(source="partner.code", read_only=True)
-    source_code = serializers.CharField(source="source.code", read_only=True)
     issued_token = serializers.SerializerMethodField(read_only=True)
     raw_token = serializers.CharField(write_only=True, required=False, min_length=20)
 
@@ -79,7 +47,6 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
             "partner_code",
             "name",
             "source",
-            "source_code",
             "is_active",
             "expires_at",
             "revoked_at",
@@ -93,7 +60,6 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "partner_code",
-            "source_code",
             "revoked_at",
             "last_used_at",
             "prefix",
@@ -103,19 +69,11 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {
             "partner": {"queryset": Partner.objects.all()},
-            "source": {"queryset": PartnerSource.objects.all(), "required": False, "allow_null": True},
+            "source": {"required": False, "allow_blank": True},
         }
 
     def get_issued_token(self, obj):
         return getattr(obj, "_issued_token", None)
-
-    def validate(self, attrs):
-        instance = getattr(self, "instance", None)
-        partner = attrs.get("partner") or getattr(instance, "partner", None)
-        source = attrs.get("source") if "source" in attrs else getattr(instance, "source", None)
-        if source is not None and partner is not None and source.partner_id != partner.id:
-            raise serializers.ValidationError({"source": "source должен принадлежать выбранному партнеру"})
-        return attrs
 
     def create(self, validated_data):
         raw_token = validated_data.pop("raw_token", None) or PartnerToken.generate_raw_token()
@@ -123,7 +81,7 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
             partner=validated_data["partner"],
             raw_token=raw_token,
             name=validated_data.get("name", ""),
-            source=validated_data.get("source"),
+            source=(validated_data.get("source") or "").strip(),
         )
         token.is_active = validated_data.get("is_active", True)
         token.expires_at = validated_data.get("expires_at")
@@ -136,7 +94,10 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         for field in ("partner", "name", "source", "expires_at"):
             if field in validated_data:
-                setattr(instance, field, validated_data[field])
+                value = validated_data[field]
+                if field == "source":
+                    value = (value or "").strip()
+                setattr(instance, field, value)
         if "is_active" in validated_data:
             instance.is_active = validated_data["is_active"]
             if instance.is_active:
@@ -149,13 +110,13 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
 
 class LeadCreateSerializer(serializers.ModelSerializer):
     # partner определяем из токена, не из тела запроса
-    source_code = serializers.SlugField(required=False, allow_blank=True)
+    source = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = Lead
         fields = [
             "id",
-            "source_code",
+            "source",
             "geo",
             "age",
             "full_name",
@@ -177,23 +138,13 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         partner_auth = request.partner_auth
 
         token_bound_source = partner_auth.source
-        source_code = (attrs.get("source_code") or "").strip()
+        source = (attrs.get("source") or "").strip()
 
         if token_bound_source:
-            # токен привязан к source => игнорируем source_code от клиента
+            # токен привязан к source-строке => игнорируем source из тела
             attrs["_source"] = token_bound_source
         else:
-            if source_code:
-                source = PartnerSource.objects.filter(
-                    partner=partner_auth.partner,
-                    code=source_code,
-                    is_active=True,
-                ).first()
-                if not source:
-                    raise serializers.ValidationError({"source_code": "Неизвестный source_code для этого партнера"})
-                attrs["_source"] = source
-            else:
-                attrs["_source"] = None
+            attrs["_source"] = source
 
         phone = (attrs.get("phone") or "").strip()
         email = (attrs.get("email") or "").strip()
@@ -214,7 +165,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         partner_auth = request.partner_auth
 
         source = validated_data.pop("_source", None)
-        validated_data.pop("source_code", None)
+        validated_data.pop("source", None)
 
         partner = partner_auth.partner
         default_status = LeadStatus.objects.filter(is_default_for_new_leads=True, is_active=True).order_by("order", "created_at").first()
@@ -243,7 +194,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     payload_after={
                         "attempt_id": str(attempt.id),
                         "partner_id": str(partner.id),
-                        "source_id": str(source.id) if source else None,
+                        "source": source or "",
                         "existing_lead_id": str(duplicate_lead.id),
                         "phone": attempt.phone,
                         "full_name": attempt.full_name,
@@ -292,7 +243,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 payload_after={
                     "attempt_id": str(attempt.id),
                     "partner_id": str(partner.id),
-                    "source_id": str(source.id) if source else None,
+                    "source": source or "",
                     "existing_lead_id": str(duplicate_lead.id),
                     "phone": attempt.phone,
                     "full_name": attempt.full_name,
@@ -308,14 +259,13 @@ class LeadCreateSerializer(serializers.ModelSerializer):
 
 
 class LeadListSerializer(serializers.ModelSerializer):
-    source_code = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
 
     class Meta:
         model = Lead
         fields = [
             "id",
-            "source_code",
+            "source",
             "geo",
             "age",
             "status",
@@ -325,11 +275,6 @@ class LeadListSerializer(serializers.ModelSerializer):
             "priority",
             "custom_fields",
         ]
-
-    def get_source_code(self, obj):
-        if not obj.source_id:
-            return None
-        return obj.source.code
 
     def get_status(self, obj):
         if not obj.status_id:

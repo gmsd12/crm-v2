@@ -93,7 +93,6 @@ class LeadSerializer(serializers.ModelSerializer):
     partner = serializers.SerializerMethodField()
     manager = serializers.SerializerMethodField()
     first_manager = serializers.SerializerMethodField()
-    source = serializers.SerializerMethodField()
     tags = serializers.SerializerMethodField()
     last_comment = serializers.SerializerMethodField()
 
@@ -161,11 +160,6 @@ class LeadSerializer(serializers.ModelSerializer):
             return None
         return self._manager_like_payload(obj.first_manager)
 
-    def get_source(self, obj):
-        if not obj.source_id:
-            return None
-        return {"id": str(obj.source_id), "code": obj.source.code, "name": obj.source.name}
-
     def get_tags(self, obj):
         tags = getattr(obj, "_prefetched_objects_cache", {}).get("tags")
         if tags is None:
@@ -219,7 +213,7 @@ class LeadWriteSerializer(serializers.ModelSerializer):
         validators = []
         extra_kwargs = {
             "partner": {"required": True},
-            "source": {"required": False, "allow_null": True},
+            "source": {"required": False, "allow_blank": True},
             "geo": {"required": False, "allow_blank": True},
             "full_name": {"required": False, "allow_blank": True},
             "phone": {"required": False, "allow_blank": True, "validators": []},
@@ -245,6 +239,8 @@ class LeadWriteSerializer(serializers.ModelSerializer):
 
         attrs["phone"] = phone
         attrs["email"] = email
+        source = ((attrs.get("source") if "source" in attrs else getattr(instance, "source", "")) or "").strip()
+        attrs["source"] = source
         geo = (attrs.get("geo") if "geo" in attrs else getattr(instance, "geo", "")) or ""
         geo = geo.strip().upper()
         if geo and not GEO_CODE_RE.fullmatch(geo):

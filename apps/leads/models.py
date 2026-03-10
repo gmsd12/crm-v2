@@ -7,7 +7,7 @@ from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 
 from apps.core.models import BaseModel
-from apps.partners.models import Partner, PartnerSource
+from apps.partners.models import Partner
 
 
 def lead_attachment_upload_to(instance, filename: str) -> str:
@@ -113,7 +113,7 @@ class Lead(BaseModel):
         on_delete=models.SET_NULL,
         related_name="first_managed_leads",
     )
-    source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
+    source = models.CharField(max_length=128, blank=True, default="", db_index=True)
     status = models.ForeignKey("leads.LeadStatus", null=True, blank=True, on_delete=models.PROTECT, related_name="leads")
     tags = models.ManyToManyField("leads.LeadTag", related_name="leads", blank=True)
 
@@ -267,7 +267,7 @@ class LeadAttachment(BaseModel):
 class LeadDuplicateAttempt(models.Model):
     id = models.BigAutoField(primary_key=True)
     partner = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name="lead_duplicate_attempts")
-    source = models.ForeignKey(PartnerSource, null=True, blank=True, on_delete=models.SET_NULL, related_name="lead_duplicate_attempts")
+    source = models.CharField(max_length=128, blank=True, default="")
     existing_lead = models.ForeignKey(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="duplicate_attempts")
     phone = models.CharField(max_length=32, db_index=True)
     full_name = models.CharField(max_length=255, blank=True, default="")

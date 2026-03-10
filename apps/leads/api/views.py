@@ -177,7 +177,7 @@ def _lead_payload(lead: Lead | None) -> dict | None:
         "partner_id": str(lead.partner_id) if lead.partner_id else None,
         "manager_id": str(lead.manager_id) if lead.manager_id else None,
         "first_manager_id": str(lead.first_manager_id) if lead.first_manager_id else None,
-        "source_id": str(lead.source_id) if lead.source_id else None,
+        "source": lead.source,
         "status_id": str(lead.status_id) if lead.status_id else None,
         "geo": lead.geo,
         "age": lead.age,
@@ -965,7 +965,7 @@ class LeadRecordFilter(django_filters.FilterSet):
     first_manager__in = NumberInFilter(field_name="first_manager_id", lookup_expr="in")
     first_manager_role = django_filters.ChoiceFilter(field_name="first_manager__role", choices=UserRole.choices)
     first_manager_role__in = RoleInFilter(field_name="first_manager__role", lookup_expr="in")
-    source__in = IdInFilter(field_name="source_id", lookup_expr="in")
+    source__in = CharInFilter(field_name="source", lookup_expr="in")
     status_code = django_filters.CharFilter(field_name="status__code", lookup_expr="iexact")
     status__in = IdInFilter(field_name="status_id", lookup_expr="in")
     tag = django_filters.NumberFilter(field_name="tags__id", distinct=True)
@@ -1393,6 +1393,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "retrieve": (Perm.LEADS_READ,),
         "stats_monthly": (Perm.LEADS_READ,),
         "stats_ftd_matrix": (Perm.LEADS_READ,),
+        "stats_non_ftd_matrix": (Perm.LEADS_READ,),
         "create": (Perm.LEADS_WRITE,),
         "update": (Perm.LEADS_WRITE,),
         "partial_update": (Perm.LEADS_WRITE,),
@@ -1404,7 +1405,7 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         role = getattr(self.request.user, "role", None)
-        if self.action in {"list", "stats_monthly", "stats_ftd_matrix"} and role == UserRole.RET:
+        if self.action in {"list", "stats_monthly", "stats_ftd_matrix", "stats_non_ftd_matrix"} and role == UserRole.RET:
             return queryset.filter(creator_id=self.request.user.id)
         include_teamleader_self = self.action in {"list", "retrieve"}
         return _filter_deposits_visible_for_user(
@@ -1620,6 +1621,99 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=False, methods=["get"], url_path="stats/non-ftd-matrix")
+    def stats_non_ftd_matrix(self, request):
+        self._assert_metrics_access_allowed()
+        queryset, params = self._get_stats_queryset(request.query_params)
+        rows = list(
+            queryset.filter(type__in=[LeadDeposit.Type.RELOAD, LeadDeposit.Type.DEPOSIT])
+            .annotate(month=TruncMonth("created_at"))
+            .values(
+                "creator_id",
+                "creator__username",
+                "creator__first_name",
+                "creator__last_name",
+                "creator__role",
+                "month",
+            )
+            .annotate(
+                reload_count=Count("id", filter=Q(type=LeadDeposit.Type.RELOAD)),
+                deposit_count=Count("id", filter=Q(type=LeadDeposit.Type.DEPOSIT)),
+                total_amount=Sum("amount"),
+            )
+            .order_by("creator__username", "creator_id", "month")
+        )
+
+        month_keys = self._month_range(
+            params.get("date_from"),
+            params.get("date_to"),
+            [row["month"] for row in rows if row["month"] is not None],
+        )
+        columns = [self._month_payload(month_start) for month_start in month_keys]
+        default_cells = {
+            column["month_key"]: {"reload_count": 0, "deposit_count": 0, "total_amount": self._amount_string(0)}
+            for column in columns
+        }
+
+        row_map: dict[int, dict] = {}
+        for row in rows:
+            creator_id = row["creator_id"]
+            if creator_id is None or row["month"] is None:
+                continue
+            if creator_id not in row_map:
+                row_map[creator_id] = {
+                    "user": {
+                        "id": str(creator_id),
+                        "username": row["creator__username"],
+                        "first_name": (row["creator__first_name"] or "").strip(),
+                        "last_name": (row["creator__last_name"] or "").strip(),
+                        "role": row["creator__role"],
+                    },
+                    "total": {
+                        "reload_count": 0,
+                        "deposit_count": 0,
+                        "total_amount": self._amount_string(0),
+                    },
+                    "cells": {month_key: cell.copy() for month_key, cell in default_cells.items()},
+                    "_total_amount_value": 0,
+                }
+            month_key = row["month"].date().replace(day=1).strftime("%Y-%m")
+            reload_count = int(row["reload_count"] or 0)
+            deposit_count = int(row["deposit_count"] or 0)
+            total_amount = row["total_amount"] or 0
+            row_map[creator_id]["cells"][month_key] = {
+                "reload_count": reload_count,
+                "deposit_count": deposit_count,
+                "total_amount": self._amount_string(total_amount),
+            }
+            row_map[creator_id]["total"]["reload_count"] += reload_count
+            row_map[creator_id]["total"]["deposit_count"] += deposit_count
+            row_map[creator_id]["_total_amount_value"] += total_amount
+            row_map[creator_id]["total"]["total_amount"] = self._amount_string(row_map[creator_id]["_total_amount_value"])
+
+        matrix_rows = sorted(
+            row_map.values(),
+            key=lambda item: (
+                -item["_total_amount_value"],
+                -(item["total"]["reload_count"] + item["total"]["deposit_count"]),
+                item["user"]["username"] or "",
+                item["user"]["id"],
+            ),
+        )
+        for row in matrix_rows:
+            row.pop("_total_amount_value", None)
+
+        return Response(
+            {
+                "period": {
+                    "date_from": params.get("date_from").isoformat() if params.get("date_from") else None,
+                    "date_to": params.get("date_to").isoformat() if params.get("date_to") else None,
+                },
+                "columns": columns,
+                "rows": matrix_rows,
+            }
+        )
+
     def _assert_update_allowed(self, deposit: LeadDeposit):
         role = getattr(self.request.user, "role", None)
         if "lead" in self.request.data:
@@ -1757,7 +1851,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "partner",
         "manager",
         "first_manager",
-        "source",
         "status",
     ).prefetch_related("tags").all().order_by("-received_at")
     serializer_class = LeadSerializer
@@ -1824,7 +1917,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "first_manager__username",
         "status__order",
         "status__code",
-        "source__code",
+        "source",
     ]
 
     def get_required_perms(self) -> tuple[str, ...]:
@@ -2422,7 +2515,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             lead.tags.set(tags)
             lead.refresh_from_db()
             lead = (
-                Lead.objects.select_related("partner", "manager", "first_manager", "source", "status")
+                Lead.objects.select_related("partner", "manager", "first_manager", "status")
                 .prefetch_related("tags")
                 .get(id=lead.id)
             )
@@ -2498,7 +2591,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=[*changed_ids, *unchanged_ids])
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .prefetch_related("tags")
                 .order_by("-received_at", "-id")
             )
@@ -3072,7 +3165,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {
@@ -3202,7 +3295,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {
@@ -3439,7 +3532,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {

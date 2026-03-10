@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand, CommandError
 from rest_framework.test import APIClient
 
 from apps.leads.models import Lead, LeadStatus
-from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.models import Partner, PartnerToken
 
 
 PARTNER_NAME_POOL = [
@@ -17,10 +17,7 @@ PARTNER_NAME_POOL = [
     "Cedar Lead Lab",
 ]
 
-SOURCE_DEFS = [
-    ("google", "Google Ads"),
-    ("facebook", "Facebook Ads"),
-]
+SOURCE_POOL = ["google_ads", "facebook_ads", "organic", "referral", "tiktok_ads"]
 
 LEAD_NAME_POOL = [
     "Emma Carter",
@@ -72,12 +69,10 @@ class Command(BaseCommand):
         results: list[PartnerRunResult] = []
         for idx in range(1, partners_count + 1):
             partner = self._ensure_partner(idx=idx, base_code=base_code)
-            sources = self._ensure_sources(partner=partner)
             raw_token = self._ensure_token(partner=partner)
             result = self._upload_leads(
                 client=client,
                 partner=partner,
-                sources=sources,
                 raw_token=raw_token,
                 partner_idx=idx,
                 leads_per_partner=leads_per_partner,
@@ -100,12 +95,12 @@ class Command(BaseCommand):
             )
 
         self.stdout.write("")
-        self.stdout.write("Example curl (replace token/source_code/phone):")
+        self.stdout.write("Example curl (replace token/source/phone):")
         self.stdout.write(
             "curl -X POST http://localhost:8000/api/v1/partner/leads/ "
             "-H 'Content-Type: application/json' "
             "-H 'X-Partner-Token: <TOKEN>' "
-            "-d '{\"source_code\":\"google\",\"geo\":\"US\",\"full_name\":\"John Doe\","
+            "-d '{\"source\":\"google_ads\",\"geo\":\"US\",\"full_name\":\"John Doe\","
             "\"phone\":\"+15550000001\",\"email\":\"john@example.com\","
             "\"custom_fields\":{\"campaign\":\"spring_sale\"}}'"
         )
@@ -173,35 +168,6 @@ class Command(BaseCommand):
             partner.save(update_fields=sorted(set(update_fields)))
         return partner
 
-    def _ensure_sources(self, *, partner: Partner) -> list[PartnerSource]:
-        result: list[PartnerSource] = []
-        for code, name in SOURCE_DEFS:
-            source = PartnerSource.all_objects.filter(partner=partner, code=code).first()
-            if source is None:
-                source = PartnerSource.objects.create(
-                    partner=partner,
-                    code=code,
-                    name=name,
-                    is_active=True,
-                )
-            else:
-                update_fields: list[str] = []
-                if source.name != name:
-                    source.name = name
-                    update_fields.append("name")
-                if source.is_deleted:
-                    source.is_deleted = False
-                    source.deleted_at = None
-                    update_fields.extend(["is_deleted", "deleted_at"])
-                if not source.is_active:
-                    source.is_active = True
-                    update_fields.append("is_active")
-                if update_fields:
-                    update_fields.append("updated_at")
-                    source.save(update_fields=sorted(set(update_fields)))
-            result.append(source)
-        return result
-
     def _ensure_token(self, *, partner: Partner) -> str:
         raw_token = f"tok_live_{partner.code.replace('-', '_')}_demo_2026_v1"
         token_hash = PartnerToken.hash_token(raw_token)
@@ -212,11 +178,11 @@ class Command(BaseCommand):
                 partner=partner,
                 raw_token=raw_token,
                 name="demo-ingest",
-                source=None,
+                source="",
             )
 
         token.name = "demo-ingest"
-        token.source = None
+        token.source = ""
         token.is_active = True
         token.revoked_at = None
         token.is_deleted = False
@@ -229,7 +195,6 @@ class Command(BaseCommand):
         *,
         client: APIClient,
         partner: Partner,
-        sources: list[PartnerSource],
         raw_token: str,
         partner_idx: int,
         leads_per_partner: int,
@@ -243,13 +208,13 @@ class Command(BaseCommand):
         for i in range(leads_per_partner):
             seq = existing_count + i + 1
             full_name = LEAD_NAME_POOL[(partner_idx * 7 + i) % len(LEAD_NAME_POOL)]
-            source = sources[i % len(sources)]
+            source = SOURCE_POOL[(partner_idx * 3 + i) % len(SOURCE_POOL)]
             geo = GEO_POOL[(partner_idx + i) % len(GEO_POOL)]
             phone = f"+1555{partner_idx:02d}{seq:04d}"
             email = f"{partner.code.replace('-', '.')}.{seq}@demo.local"
 
             payload = {
-                "source_code": source.code,
+                "source": source,
                 "geo": geo,
                 "full_name": full_name,
                 "phone": phone,

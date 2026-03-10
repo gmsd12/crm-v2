@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Partner, PartnerSource, PartnerToken
+from .models import Partner, PartnerToken
 
 
 class SoftDeleteAdminMixin:
@@ -54,15 +54,6 @@ class PartnerAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
     list_filter = ("is_active", "is_deleted")
     search_fields = ("name", "code")
     ordering = ("code",)
-    actions = ("soft_delete_selected", "restore_selected")
-
-
-@admin.register(PartnerSource)
-class PartnerSourceAdmin(SoftDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("partner", "code", "name", "is_active", "is_deleted", "created_at")
-    list_filter = ("is_active", "partner", "is_deleted")
-    search_fields = ("code", "name", "partner__code", "partner__name")
-    ordering = ("partner__code", "code")
     actions = ("soft_delete_selected", "restore_selected")
 
 

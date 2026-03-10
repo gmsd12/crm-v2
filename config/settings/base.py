@@ -92,6 +92,9 @@ INSTALLED_APPS = [
 if importlib.util.find_spec("import_export"):
     INSTALLED_APPS.append("import_export")
 
+if importlib.util.find_spec("rangefilter"):
+    INSTALLED_APPS.append("rangefilter")
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     "corsheaders.middleware.CorsMiddleware",

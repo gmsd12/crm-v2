@@ -1048,12 +1048,12 @@ def emit_manager_no_activity_notifications(*, now=None, threshold: int | None = 
 def emit_partner_duplicate_attempt_notification(*, attempt_id: int, now=None) -> int:
     now = now or timezone.now()
     attempt = (
-        LeadDuplicateAttempt.objects.select_related("partner", "source", "existing_lead", "existing_lead__manager")
+        LeadDuplicateAttempt.objects.select_related("partner", "existing_lead", "existing_lead__manager")
         .filter(id=attempt_id)
         .only(
             "id",
             "partner_id",
-            "source_id",
+            "source",
             "existing_lead_id",
             "created_at",
             "phone",
@@ -1120,7 +1120,7 @@ def emit_partner_duplicate_attempt_notification(*, attempt_id: int, now=None) ->
                 payload={
                     "attempt_id": str(attempt.id),
                     "partner_id": str(attempt.partner_id),
-                    "source_id": str(attempt.source_id) if attempt.source_id else None,
+                    "source": attempt.source or "",
                     "existing_lead_id": str(attempt.existing_lead_id) if attempt.existing_lead_id else None,
                     "phone": attempt.phone,
                     "attempts_count": attempts_count,

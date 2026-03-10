@@ -11,32 +11,17 @@ from apps.iam.api.rbac_mixins import RBACActionMixin
 from apps.iam.api.rbac_permissions import RBACPermission
 from apps.iam.rbac import Perm
 from apps.partners.auth import PartnerTokenAuthentication
-from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.models import Partner, PartnerToken
 from apps.partners.pagination import PartnerLeadPagination
 from apps.partners.permissions import IsPartnerAuthenticated
 from apps.partners.throttling import PartnerTokenRateThrottle
 from apps.leads.models import Lead
 from .serializers import (
     PartnerAdminSerializer,
-    PartnerSourceAdminSerializer,
     PartnerTokenAdminSerializer,
-    PartnerSourceSerializer,
     LeadCreateSerializer,
     LeadListSerializer,
 )
-
-
-class PartnerSourceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    authentication_classes = [PartnerTokenAuthentication]
-    permission_classes = [IsPartnerAuthenticated]
-    serializer_class = PartnerSourceSerializer
-    filter_backends = [drf_filters.OrderingFilter]
-    ordering = ["code"]
-    ordering_fields = ["id", "code", "name", "created_at", "updated_at"]
-
-    def get_queryset(self):
-        partner = self.request.partner_auth.partner
-        return PartnerSource.objects.filter(partner=partner).order_by("code")
 
 
 class _BasePartnerCatalogAdminViewSet(RBACActionMixin, viewsets.ModelViewSet):
@@ -81,27 +66,6 @@ class PartnerAdminViewSet(_BasePartnerCatalogAdminViewSet):
         return Partner.objects.all().order_by("code")
 
 
-class PartnerSourceAdminViewSet(_BasePartnerCatalogAdminViewSet):
-    serializer_class = PartnerSourceAdminSerializer
-    filterset_fields = ["partner", "is_active", "code"]
-    ordering = ["partner__code", "code"]
-    ordering_fields = [
-        "id",
-        "partner__code",
-        "partner__name",
-        "code",
-        "name",
-        "is_active",
-        "created_at",
-        "updated_at",
-    ]
-
-    def get_queryset(self):
-        if self.action in {"restore"}:
-            return PartnerSource.all_objects.select_related("partner").all().order_by("partner__code", "code")
-        return PartnerSource.objects.select_related("partner").all().order_by("partner__code", "code")
-
-
 class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
     serializer_class = PartnerTokenAdminSerializer
     filterset_fields = ["partner", "source", "is_active", "name"]
@@ -112,7 +76,7 @@ class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
         "updated_at",
         "partner__code",
         "name",
-        "source__code",
+        "source",
         "is_active",
         "expires_at",
         "last_used_at",
@@ -120,27 +84,20 @@ class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
 
     def get_queryset(self):
         if self.action in {"restore"}:
-            return PartnerToken.all_objects.select_related("partner", "source").all().order_by("-created_at")
-        return PartnerToken.objects.select_related("partner", "source").all().order_by("-created_at")
+            return PartnerToken.all_objects.select_related("partner").all().order_by("-created_at")
+        return PartnerToken.objects.select_related("partner").all().order_by("-created_at")
 
 
 class LeadFilter(FilterSet):
-    source = filters.CharFilter(method="filter_source")
+    source = filters.CharFilter(field_name="source", lookup_expr="iexact")
     phone = filters.CharFilter(field_name="phone", lookup_expr="exact")
     age = filters.NumberFilter(field_name="age", lookup_expr="exact")
     received_from = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="gte")
     received_to = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="lte")
 
-    def filter_source(self, qs, name, value):
-        value = (value or "").strip()
-        if not value:
-            return qs
-        # фильтр по source.code
-        return qs.filter(source__code=value)
-
     class Meta:
         model = Lead
-        fields = ["phone", "age"]
+        fields = ["phone", "age", "source"]
 
 
 class PartnerLeadViewSet(
@@ -163,7 +120,7 @@ class PartnerLeadViewSet(
         "full_name",
         "email",
         "priority",
-        "source__code",
+        "source",
         "status__code",
     ]
     ordering = ["-received_at"]
@@ -173,7 +130,7 @@ class PartnerLeadViewSet(
         partner = self.request.partner_auth.partner
         return (
             Lead.objects.filter(partner=partner)
-            .select_related("source", "status")
+            .select_related("status")
             .order_by("-received_at")
         )
 
