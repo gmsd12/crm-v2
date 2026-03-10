@@ -177,7 +177,7 @@ def _lead_payload(lead: Lead | None) -> dict | None:
         "partner_id": str(lead.partner_id) if lead.partner_id else None,
         "manager_id": str(lead.manager_id) if lead.manager_id else None,
         "first_manager_id": str(lead.first_manager_id) if lead.first_manager_id else None,
-        "source_id": str(lead.source_id) if lead.source_id else None,
+        "source": lead.source,
         "status_id": str(lead.status_id) if lead.status_id else None,
         "geo": lead.geo,
         "age": lead.age,
@@ -965,7 +965,7 @@ class LeadRecordFilter(django_filters.FilterSet):
     first_manager__in = NumberInFilter(field_name="first_manager_id", lookup_expr="in")
     first_manager_role = django_filters.ChoiceFilter(field_name="first_manager__role", choices=UserRole.choices)
     first_manager_role__in = RoleInFilter(field_name="first_manager__role", lookup_expr="in")
-    source__in = IdInFilter(field_name="source_id", lookup_expr="in")
+    source__in = CharInFilter(field_name="source", lookup_expr="in")
     status_code = django_filters.CharFilter(field_name="status__code", lookup_expr="iexact")
     status__in = IdInFilter(field_name="status_id", lookup_expr="in")
     tag = django_filters.NumberFilter(field_name="tags__id", distinct=True)
@@ -1757,7 +1757,6 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "partner",
         "manager",
         "first_manager",
-        "source",
         "status",
     ).prefetch_related("tags").all().order_by("-received_at")
     serializer_class = LeadSerializer
@@ -1824,7 +1823,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "first_manager__username",
         "status__order",
         "status__code",
-        "source__code",
+        "source",
     ]
 
     def get_required_perms(self) -> tuple[str, ...]:
@@ -2422,7 +2421,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             lead.tags.set(tags)
             lead.refresh_from_db()
             lead = (
-                Lead.objects.select_related("partner", "manager", "first_manager", "source", "status")
+                Lead.objects.select_related("partner", "manager", "first_manager", "status")
                 .prefetch_related("tags")
                 .get(id=lead.id)
             )
@@ -2498,7 +2497,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=[*changed_ids, *unchanged_ids])
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .prefetch_related("tags")
                 .order_by("-received_at", "-id")
             )
@@ -3072,7 +3071,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {
@@ -3202,7 +3201,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {
@@ -3439,7 +3438,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
             refreshed_leads = list(
                 Lead.objects.filter(id__in=updated_ids)
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                .select_related("partner", "manager", "first_manager", "status")
                 .order_by("-received_at")
             )
             response_payload = {

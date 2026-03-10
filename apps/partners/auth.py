@@ -11,7 +11,7 @@ class PartnerAuthResult:
     def __init__(self, token: PartnerToken):
         self.token = token
         self.partner = token.partner
-        self.source = token.source
+        self.source = (token.source or "").strip()
 
 
 class PartnerTokenAuthentication(BaseAuthentication):
@@ -44,7 +44,7 @@ class PartnerTokenAuthentication(BaseAuthentication):
 
         token = (
             PartnerToken.objects
-            .select_related("partner", "source")
+            .select_related("partner")
             .filter(prefix=prefix, token_hash=token_hash, is_active=True, revoked_at__isnull=True)
             .first()
         )

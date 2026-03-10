@@ -10,7 +10,7 @@ from import_export import fields, resources, widgets
 
 from apps.iam.models import User
 from apps.leads.models import Lead, LeadStatus, LeadTag
-from apps.partners.models import Partner, PartnerSource
+from apps.partners.models import Partner
 
 
 COMMENT_EXPORT_SEPARATOR = "\n---\n"
@@ -25,29 +25,6 @@ class PartnerCodeWidget(widgets.Widget):
             return Partner.objects.get(code=raw_value, is_deleted=False)
         except Partner.DoesNotExist as exc:
             raise ValidationError(f"Unknown partner_code: {raw_value}") from exc
-
-    def render(self, value, obj=None, **kwargs):
-        return value.code if value else ""
-
-
-class PartnerSourceCodeWidget(widgets.Widget):
-    def clean(self, value, row=None, **kwargs):
-        raw_value = (value or "").strip()
-        if not raw_value:
-            return None
-        partner_code = ((row or {}).get("partner_code") or "").strip()
-        if not partner_code:
-            raise ValidationError("partner_code is required when source_code is provided")
-        try:
-            return PartnerSource.objects.get(
-                partner__code=partner_code,
-                code=raw_value,
-                is_deleted=False,
-            )
-        except PartnerSource.DoesNotExist as exc:
-            raise ValidationError(
-                f"Unknown source_code for partner {partner_code}: {raw_value}"
-            ) from exc
 
     def render(self, value, obj=None, **kwargs):
         return value.code if value else ""
@@ -167,8 +144,7 @@ class LeadResource(resources.ModelResource):
     id = fields.Field(attribute="id", column_name="id", readonly=True)
     partner_code = fields.Field(attribute="partner", column_name="partner_code", widget=PartnerCodeWidget())
     partner_name = fields.Field(column_name="partner_name", readonly=True)
-    source_code = fields.Field(attribute="source", column_name="source_code", widget=PartnerSourceCodeWidget())
-    source_name = fields.Field(column_name="source_name", readonly=True)
+    source = fields.Field(attribute="source", column_name="source")
     status_code = fields.Field(attribute="status", column_name="status_code", widget=LeadStatusCodeWidget())
     status_name = fields.Field(column_name="status_name", readonly=True)
     manager_username = fields.Field(
@@ -206,8 +182,7 @@ class LeadResource(resources.ModelResource):
             "id",
             "partner_code",
             "partner_name",
-            "source_code",
-            "source_name",
+            "source",
             "status_code",
             "status_name",
             "manager_username",
@@ -249,7 +224,7 @@ class LeadResource(resources.ModelResource):
 
     def filter_export(self, queryset, **kwargs):
         return (
-            queryset.select_related("partner", "source", "status", "manager", "first_manager")
+            queryset.select_related("partner", "status", "manager", "first_manager")
             .prefetch_related("tags", "comments__author")
             .order_by("-received_at", "-id")
         )
@@ -260,8 +235,8 @@ class LeadResource(resources.ModelResource):
 
         if self.default_partner and not (row.get("partner_code") or "").strip():
             row["partner_code"] = self.default_partner.code
-        if self.default_source and not (row.get("source_code") or "").strip():
-            row["source_code"] = self.default_source.code
+        if self.default_source and not (row.get("source") or "").strip():
+            row["source"] = self.default_source
         if self.default_status and not (row.get("status_code") or "").strip():
             row["status_code"] = self.default_status.code
         if self.default_manager and not (row.get("manager_username") or "").strip():
@@ -273,9 +248,6 @@ class LeadResource(resources.ModelResource):
 
     def dehydrate_partner_name(self, obj):
         return obj.partner.name if obj.partner_id else ""
-
-    def dehydrate_source_name(self, obj):
-        return obj.source.name if obj.source_id else ""
 
     def dehydrate_status_name(self, obj):
         return obj.status.name if obj.status_id else ""
@@ -300,7 +272,7 @@ class LeadResource(resources.ModelResource):
         if new:
             if instance.partner_id is None and self.default_partner is not None:
                 instance.partner = self.default_partner
-            if instance.source_id is None and self.default_source is not None:
+            if not (instance.source or "").strip() and self.default_source is not None:
                 instance.source = self.default_source
             if instance.status_id is None and self.default_status is not None:
                 instance.status = self.default_status
@@ -321,6 +293,7 @@ class LeadResource(resources.ModelResource):
             )
         if instance.geo:
             instance.geo = instance.geo.upper()
+        instance.source = (instance.source or "").strip()
         if instance.email:
             instance.email = instance.email.lower()
         super().before_save_instance(instance, row, **kwargs)

@@ -16,7 +16,7 @@ from apps.leads.models import (
     LeadAuditLog,
     LeadAuditSource,
 )
-from apps.partners.models import Partner, PartnerSource
+from apps.partners.models import Partner
 
 User = get_user_model()
 
@@ -39,7 +39,7 @@ class Command(BaseCommand):
             raise CommandError("--leads and --comments must be >= 0")
 
         partner = self._ensure_partner(options["partner_code"], options["partner_name"])
-        sources = self._ensure_sources(partner)
+        source_values = self._default_sources()
         statuses = self._ensure_statuses()
 
         users = []
@@ -52,7 +52,7 @@ class Command(BaseCommand):
 
         created_leads = self._create_leads(
             partner=partner,
-            sources=sources,
+            source_values=source_values,
             statuses=statuses,
             assignees=assignable,
             users=users,
@@ -80,25 +80,14 @@ class Command(BaseCommand):
             partner.save(update_fields=["name", "updated_at"])
         return partner
 
-    def _ensure_sources(self, partner: Partner) -> list[PartnerSource]:
-        source_defs = [
-            ("website", "Website"),
-            ("referral", "Referral"),
-            ("ads", "Paid Ads"),
-            ("events", "Events"),
+    @staticmethod
+    def _default_sources() -> list[str]:
+        return [
+            "website",
+            "referral",
+            "ads",
+            "events",
         ]
-        result = []
-        for code, name in source_defs:
-            source, created = PartnerSource.objects.get_or_create(
-                partner=partner,
-                code=code,
-                defaults={"name": name, "is_active": True},
-            )
-            if not created and source.name != name:
-                source.name = name
-                source.save(update_fields=["name", "updated_at"])
-            result.append(source)
-        return result
 
     def _ensure_statuses(self) -> dict[str, LeadStatus]:
         status_defs = [
@@ -208,7 +197,7 @@ class Command(BaseCommand):
         self,
         *,
         partner: Partner,
-        sources: list[PartnerSource],
+        source_values: list[str],
         statuses: dict[str, LeadStatus],
         assignees: list[User],
         users: list[User],
@@ -270,7 +259,7 @@ class Command(BaseCommand):
             lead_seq = seq + idx
             full_name = f"{first_names[lead_seq % len(first_names)]} {last_names[lead_seq % len(last_names)]}"
             company = companies[lead_seq % len(companies)]
-            source = sources[lead_seq % len(sources)]
+            source = source_values[lead_seq % len(source_values)]
 
             if lead_seq % 10 == 0:
                 status_obj = statuses["WON"]

@@ -34,13 +34,13 @@ from .models import (
     LeadIdempotencyKey,
 )
 from apps.iam.models import User
-from apps.partners.models import PartnerSource, Partner
+from apps.partners.models import Partner
 
 if IMPORT_EXPORT_AVAILABLE:
     class LeadExportForm(SelectableFieldsExportForm):
         DEFAULT_EXPORT_FIELDS = [
             "partner_name",
-            "source_name",
+            "source",
             "status_name",
             "geo",
             "full_name",
@@ -70,10 +70,9 @@ if IMPORT_EXPORT_AVAILABLE:
             required=False,
             help_text="Optional fallback when partner_code is omitted in CSV.",
         )
-        source = forms.ModelChoiceField(
-            queryset=PartnerSource.objects.filter(is_deleted=False).select_related("partner").order_by("partner__name", "name"),
+        source = forms.CharField(
             required=False,
-            help_text="Optional fallback when source_code is omitted in CSV.",
+            help_text="Optional fallback when source is omitted in CSV.",
         )
         status = forms.ModelChoiceField(
             queryset=LeadStatus.objects.filter(is_deleted=False).order_by("order", "code"),
@@ -97,8 +96,7 @@ if IMPORT_EXPORT_AVAILABLE:
             required=False,
             widget=forms.HiddenInput(),
         )
-        source = forms.ModelChoiceField(
-            queryset=PartnerSource.objects.filter(is_deleted=False),
+        source = forms.CharField(
             required=False,
             widget=forms.HiddenInput(),
         )
@@ -264,8 +262,7 @@ class LeadAdmin(SoftDeleteAdminMixin, ExportActionMixin, ImportExportModelAdmin)
         "partner__code",
         "partner__name",
         "status__code",
-        "source__code",
-        "source__name",
+        "source",
     )
     ordering = ("-received_at",)
     readonly_fields = ("received_at", "created_at", "updated_at", "deleted_at")
@@ -296,7 +293,7 @@ class LeadAdmin(SoftDeleteAdminMixin, ExportActionMixin, ImportExportModelAdmin)
         for field_name in ("partner", "source", "status", "manager", "first_manager"):
             value = import_form.cleaned_data.get(field_name)
             if value is not None:
-                initial[field_name] = value.pk
+                initial[field_name] = value.pk if hasattr(value, "pk") else value
         return initial
 
     def get_import_resource_kwargs(self, request, **kwargs):
