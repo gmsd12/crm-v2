@@ -1,8 +1,11 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.http import JsonResponse
 from django.test import override_settings
+from django.urls import path
 from django.utils import timezone
+from rest_framework.decorators import api_view
 from rest_framework.test import APITestCase
 
 from apps.core.models import Notification, NotificationPolicy, NotificationPreference
@@ -22,6 +25,26 @@ from apps.partners.models import Partner, PartnerSource
 User = get_user_model()
 
 
+@api_view(["GET"])
+def failing_api_view(request):
+    raise RuntimeError("api boom")
+
+
+def failing_django_view(request):
+    raise RuntimeError("django boom")
+
+
+def ok_django_view(request):
+    return JsonResponse({"ok": True})
+
+
+urlpatterns = [
+    path("test/drf-fail/", failing_api_view),
+    path("test/django-fail/", failing_django_view),
+    path("test/django-ok/", ok_django_view),
+]
+
+
 class HealthApiTests(APITestCase):
     def test_health_returns_ok_and_request_id_header(self):
         response = self.client.get("/api/health/")
@@ -29,6 +52,58 @@ class HealthApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, {"status": "ок"})
         self.assertIn("X-Request-ID", response)
+
+    def test_health_logs_success_response_with_request_id(self):
+        request_id = "log-check-20260310"
+
+        with self.assertLogs("crm.request", level="INFO") as captured:
+            response = self.client.get("/api/health/", HTTP_X_REQUEST_ID=request_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], request_id)
+
+        logs = "\n".join(captured.output)
+        self.assertIn("HTTP response", logs)
+        self.assertIn("status=200", logs)
+        self.assertIn("path=/api/health/", logs)
+        self.assertIn(f"rid={request_id}", logs)
+
+
+@override_settings(ROOT_URLCONF="apps.core.tests")
+class ErrorLoggingTests(APITestCase):
+    def setUp(self):
+        self.client.raise_request_exception = False
+
+    def test_drf_internal_error_logs_traceback_and_request_id(self):
+        request_id = "8b679ec4-5d27-4c57-90c7-fe8b596c5865"
+
+        with self.assertLogs("crm.request", level="ERROR") as captured:
+            response = self.client.get("/test/drf-fail/", HTTP_X_REQUEST_ID=request_id)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response["X-Request-ID"], request_id)
+        self.assertEqual(response.data["error"]["request_id"], request_id)
+
+        logs = "\n".join(captured.output)
+        self.assertIn("Unhandled API exception", logs)
+        self.assertIn(f"rid={request_id}", logs)
+        self.assertIn("Traceback", logs)
+        self.assertIn("HTTP 5xx response", logs)
+
+    def test_django_internal_error_logs_traceback_and_request_id(self):
+        request_id = "8b679ec4-5d27-4c57-90c7-fe8b596c5865"
+
+        with self.assertLogs("crm.request", level="ERROR") as captured:
+            response = self.client.get("/test/django-fail/", HTTP_X_REQUEST_ID=request_id)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response["X-Request-ID"], request_id)
+
+        logs = "\n".join(captured.output)
+        self.assertIn("Unhandled Django exception", logs)
+        self.assertIn(f"rid={request_id}", logs)
+        self.assertIn("Traceback", logs)
+        self.assertIn("HTTP 5xx response", logs)
 
 
 class NotificationApiTests(APITestCase):

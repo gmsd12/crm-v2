@@ -16,6 +16,7 @@ venv/
 !.env.example
 *.sqlite3
 media/
+staticfiles/
 
 # IDE / OS
 .idea/
@@ -27,7 +28,7 @@ docs/tasks.txt
 # Coverage
 coverage/
 htmlcov/
-celerybeat-schedule
+celerybeat-schedule*
 .run/
 
 # Keep migrations local only

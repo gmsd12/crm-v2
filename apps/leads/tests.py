@@ -12,6 +12,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from apps.iam.models import UserRole
+from apps.leads.api.views import _locked_leads_queryset
 from apps.leads.attachment_validation import AttachmentValidationError
 from apps.leads.models import (
     Lead,
@@ -46,6 +47,12 @@ class LeadStatusCatalogApiTests(APITestCase):
 
     def _set_deposit_created_at(self, deposit_obj, dt_obj):
         LeadDeposit.objects.filter(id=deposit_obj.id).update(created_at=dt_obj)
+
+    def test_locked_leads_queryset_avoids_select_related_joins(self):
+        sql = str(_locked_leads_queryset().filter(id__in=[1, 2, 3]).query).upper()
+
+        self.assertFalse(_locked_leads_queryset().query.select_related)
+        self.assertNotIn(" JOIN ", sql)
 
     def test_teamleader_can_list_statuses(self):
         teamleader = User.objects.create_user(username="tl_status_list", password="pass12345", role=UserRole.TEAMLEADER)

@@ -645,6 +645,12 @@ def _save_idempotency_response(record, *, response_status: int, response_body):
     record.save(update_fields=["response_status", "response_body", "updated_at"])
 
 
+def _locked_leads_queryset():
+    # PostgreSQL rejects SELECT ... FOR UPDATE when the query joins nullable FK targets.
+    # Lock the Lead rows first and let related objects load separately when needed.
+    return Lead.objects.select_for_update()
+
+
 def _assert_status_not_used(status_obj: LeadStatus, *, action: str):
     if Lead.all_objects.filter(status_id=status_obj.id).exists():
         raise serializers.ValidationError({"status": f"Нельзя {action} статус, который уже назначен лидам"})
@@ -2406,8 +2412,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         with transaction.atomic():
             lead = (
-                Lead.objects.select_for_update()
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                _locked_leads_queryset()
                 .prefetch_related("tags")
                 .get(id=pk)
             )
@@ -2446,8 +2451,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
         with transaction.atomic():
             locked_leads = list(
-                Lead.objects.select_for_update()
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                _locked_leads_queryset()
                 .prefetch_related("tags")
                 .filter(id__in=lead_ids)
             )
@@ -2832,8 +2836,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             reason = serializer.validated_data.get("reason", "")
 
             lead = (
-                Lead.objects.select_for_update()
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                _locked_leads_queryset()
                 .get(id=pk)
             )
             self._assert_can_manage_assignment(lead, operation="assign")
@@ -2930,8 +2933,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             reason = serializer.validated_data.get("reason", "")
 
             lead = (
-                Lead.objects.select_for_update()
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                _locked_leads_queryset()
                 .get(id=pk)
             )
             self._assert_can_manage_assignment(lead, operation="unassign")
@@ -3008,8 +3010,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 )
 
             locked_leads = list(
-                Lead.objects.select_for_update()
-                .select_related("manager", "first_manager")
+                _locked_leads_queryset()
                 .filter(id__in=lead_ids)
             )
             leads_map = {lead.id: lead for lead in locked_leads}
@@ -3166,8 +3167,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 return cached_response
 
             locked_leads = list(
-                Lead.objects.select_for_update()
-                .select_related("manager")
+                _locked_leads_queryset()
                 .filter(id__in=lead_ids)
             )
             leads_map = {lead.id: lead for lead in locked_leads}
@@ -3268,8 +3268,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             force = serializer.validated_data.get("force", False)
 
             lead = (
-                Lead.objects.select_for_update()
-                .select_related("partner", "manager", "first_manager", "source", "status")
+                _locked_leads_queryset()
                 .get(id=pk)
             )
             self._assert_can_edit(lead)
@@ -3363,8 +3362,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 return cached_response
 
             locked_leads = list(
-                Lead.objects.select_for_update()
-                .select_related("status")
+                _locked_leads_queryset()
                 .filter(id__in=lead_ids)
             )
             self._assert_bulk_status_change_allowed(locked_leads)
