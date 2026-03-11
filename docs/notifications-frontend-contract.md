@@ -72,6 +72,8 @@ Returned by list, detail, mark-read and SSE `notifications` event.
 - list and SSE return only notifications with `status=sent`
 - `pending`, `failed`, `cancelled` are backend lifecycle states and are not part of normal inbox UI flow
 - frontend should treat unknown `payload` keys as optional
+- canonical timestamps must be taken only from structured fields like `scheduled_for`, `sent_at`, `created_at` or from `payload`
+- frontend must not parse date/time semantics from `title` or `body`
 
 ## Event Types
 
@@ -224,6 +226,11 @@ Bulk summary:
 }
 ```
 
+Body contract:
+
+- `body` is generic: `Контакт запланирован`
+- exact planned datetime must be taken from `payload.next_contact_at`
+
 ### `next_contact_overdue`
 
 ```json
@@ -235,6 +242,11 @@ Bulk summary:
   "repeat_minutes": 15
 }
 ```
+
+Body contract:
+
+- `body` is generic: `Следующий контакт просрочен`
+- exact overdue datetime must be taken from `payload.next_contact_at`
 
 ### `manager_no_activity`
 
@@ -547,6 +559,7 @@ For frontend product code it should be treated as secondary/internal:
 - treat `payload.mode === "bulk_summary"` as a separate card variant
 - never depend on `payload` being identical across all events
 - `actor` and `lead` may be `null`
+- do not encode timezone-sensitive business meaning in rendered `body`; use payload timestamps
 - do not expect unread items to arrive in list if they are not yet `sent`
 - after `mark-read` and `mark-all-read`, update local state immediately, but keep SSE `unread_count` as source of truth
 - there is no websocket contract; realtime channel is SSE only

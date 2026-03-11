@@ -13,7 +13,7 @@ from apps.notifications.events import NotificationEvent
 from apps.notifications.models import Notification
 from apps.notifications.policies import resolve_user_settings_cached
 from apps.notifications.recipients import resolve_lead_event_recipients, resolve_manager_event_recipients
-from apps.notifications.renderers import format_human_datetime, format_user_short
+from apps.notifications.renderers import format_user_short
 from apps.notifications.runtime import NotificationEmitPayload, emit
 
 User = get_user_model()
@@ -83,7 +83,7 @@ def emit_next_contact_overdue_notifications(*, now=None, limit: int | None = Non
                     actor_user_id=None,
                     lead_id=lead.id,
                     title=f"Просрочен: {lead_label}",
-                    body=f"Следующий контакт просрочен с {format_human_datetime(lead.next_contact_at)}",
+                    body="Следующий контакт просрочен",
                     payload={
                         "notification_kind": "overdue",
                         "lead_id": str(lead.id),
@@ -247,7 +247,7 @@ def reschedule_next_contact_planned_notifications(*, lead_id: int, remind_before
                 actor_user_id=None,
                 lead_id=lead.id,
                 title=f"Напоминание о контакте: {lead_label}",
-                body=f"Контакт запланирован на {format_human_datetime(lead.next_contact_at)}",
+                body="Контакт запланирован",
                 payload={
                     "notification_kind": "planned_reminder",
                     "lead_id": str(lead.id),

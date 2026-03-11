@@ -1,15 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-
-from django.utils import timezone
-
-
-def format_human_datetime(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    return timezone.localtime(value).strftime("%d-%m-%Y %H:%M")
-
 
 def format_user_short(user) -> str:
     if not user:

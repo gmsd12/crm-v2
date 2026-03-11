@@ -4,6 +4,43 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+def _drop_column_if_exists(schema_editor, *, table_name: str, column_name: str) -> None:
+    with schema_editor.connection.cursor() as cursor:
+        if schema_editor.connection.vendor == "sqlite":
+            existing_columns = {
+                row[1]
+                for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if column_name not in existing_columns:
+                return
+            indexes = cursor.execute(f"PRAGMA index_list({table_name})").fetchall()
+            for index_row in indexes:
+                index_name = index_row[1]
+                if index_name.startswith("sqlite_autoindex_"):
+                    continue
+                indexed_columns = {
+                    info_row[2]
+                    for info_row in cursor.execute(f"PRAGMA index_info({index_name})").fetchall()
+                }
+                if column_name in indexed_columns:
+                    cursor.execute(f"DROP INDEX IF EXISTS {index_name}")
+            cursor.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+            return
+        cursor.execute(f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS {column_name} CASCADE")
+
+
+def drop_legacy_notification_columns(apps, schema_editor):
+    _drop_column_if_exists(schema_editor, table_name="notification_deliveries", column_name="channel")
+    _drop_column_if_exists(schema_editor, table_name="notification_deliveries", column_name="delivery_payload")
+    _drop_column_if_exists(schema_editor, table_name="notification_delivery_attempts", column_name="channel")
+    _drop_column_if_exists(schema_editor, table_name="notification_delivery_attempts", column_name="provider_message_id")
+    _drop_column_if_exists(schema_editor, table_name="notification_delivery_attempts", column_name="response_payload")
+
+
+def noop(apps, schema_editor):
+    return
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -66,7 +103,9 @@ class Migration(migrations.Migration):
             index=models.Index(fields=['dedupe_key', 'status'], name='notificatio_dedupe__ef3699_idx'),
         ),
         migrations.SeparateDatabaseAndState(
-            database_operations=[],
+            database_operations=[
+                migrations.RunPython(drop_legacy_notification_columns, noop),
+            ],
             state_operations=[
                 migrations.RemoveField(
                     model_name='notificationdelivery',

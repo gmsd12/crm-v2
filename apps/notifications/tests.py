@@ -10,7 +10,10 @@ from django.utils import timezone
 from apps.iam.models import User, UserRole
 from apps.leads.models import Lead, LeadComment, LeadStatus
 from apps.notifications.handlers.lead_events import emit_comment_added_notification
-from apps.notifications.handlers.followups import reschedule_next_contact_planned_notifications
+from apps.notifications.handlers.followups import (
+    emit_next_contact_overdue_notifications,
+    reschedule_next_contact_planned_notifications,
+)
 from apps.notifications.events import NotificationEvent
 from apps.notifications.models import (
     Notification,
@@ -212,6 +215,52 @@ class NotificationOutboxTests(TransactionTestCase):
         self.assertEqual(delivery.status, NotificationDelivery.Status.CANCELLED)
         self.assertEqual(attempt.status, NotificationDeliveryAttempt.Status.CANCELLED)
         self.assertEqual(attempt.error_message, "Delivery precondition failed")
+
+    def test_planned_reminder_uses_payload_as_canonical_datetime_and_generic_body(self):
+        next_contact_at = timezone.now() + timedelta(minutes=20)
+        lead = Lead.objects.create(
+            partner=self.partner,
+            manager=self.manager,
+            status=self.working_status,
+            phone="700000004",
+            full_name="Lead Four",
+            next_contact_at=next_contact_at,
+        )
+
+        created = reschedule_next_contact_planned_notifications(lead_id=lead.id, remind_before_minutes=15)
+        self.assertEqual(created, 1)
+
+        notification = Notification.objects.get(
+            event_type=NotificationEvent.NEXT_CONTACT_PLANNED,
+            recipient=self.manager,
+            lead=lead,
+        )
+
+        self.assertEqual(notification.body, "Контакт запланирован")
+        self.assertEqual(notification.payload.get("next_contact_at"), next_contact_at.isoformat())
+
+    def test_overdue_reminder_uses_payload_as_canonical_datetime_and_generic_body(self):
+        next_contact_at = timezone.now() - timedelta(minutes=20)
+        lead = Lead.objects.create(
+            partner=self.partner,
+            manager=self.manager,
+            status=self.working_status,
+            phone="700000005",
+            full_name="Lead Five",
+            next_contact_at=next_contact_at,
+        )
+
+        created = emit_next_contact_overdue_notifications(now=timezone.now(), limit=50)
+        self.assertEqual(created, 1)
+
+        notification = Notification.objects.get(
+            event_type=NotificationEvent.NEXT_CONTACT_OVERDUE,
+            recipient=self.manager,
+            lead=lead,
+        )
+
+        self.assertEqual(notification.body, "Следующий контакт просрочен")
+        self.assertEqual(notification.payload.get("next_contact_at"), next_contact_at.isoformat())
 
     def test_emit_dedupes_on_delivery_record(self):
         scheduled_for = timezone.now() + timedelta(minutes=5)
