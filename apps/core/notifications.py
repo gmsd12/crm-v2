@@ -314,13 +314,12 @@ def emit_lead_assigned_notification(*, lead_id: int, to_manager_id: int, actor_u
         event_type=NotificationEvent.LEAD_ASSIGNED,
         lead=lead,
         primary_recipient_ids=[to_manager_id],
+        excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
     )
     manager_label = _format_user_short(lead.manager) if lead.manager else "менеджер"
 
     created_notification = None
     for recipient in recipients:
-        if actor_user_id is not None and actor_user_id == recipient.id:
-            continue
         item = emit(
             NotificationEmitPayload(
                 event_type=NotificationEvent.LEAD_ASSIGNED,
@@ -370,6 +369,7 @@ def emit_bulk_lead_assigned_notification(
         event_type=NotificationEvent.LEAD_ASSIGNED,
         lead=sample_lead,
         primary_recipient_ids=[to_manager_id],
+        excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
     )
 
     lead_count = len(unique_lead_ids)
@@ -382,8 +382,6 @@ def emit_bulk_lead_assigned_notification(
     batch_key = batch_id or f"{to_manager_id}:{lead_count}:{sample_ids[0]}:{sample_ids[-1]}"
     created = 0
     for recipient in recipients:
-        if actor_user_id is not None and actor_user_id == recipient.id:
-            continue
         item = emit(
             NotificationEmitPayload(
                 event_type=NotificationEvent.LEAD_ASSIGNED,
@@ -430,6 +428,7 @@ def emit_lead_unassigned_notification(
         primary_recipient_ids=[from_manager_id],
         manager_id_for_scope=from_manager_id,
         manager_role_for_scope=manager_role,
+        excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
     )
     if not recipients:
         return None
@@ -469,80 +468,201 @@ def emit_bulk_lead_unassigned_notification(
     actor_user_id: int | None,
     batch_id: str | None = None,
 ) -> int:
-    if not lead_to_from_manager:
+    unique_pairs = [(int(lead_id), int(from_manager_id)) for lead_id, from_manager_id in dict.fromkeys(lead_to_from_manager) if from_manager_id]
+    if not unique_pairs:
         return 0
 
-    grouped: dict[int, list[int]] = {}
-    for lead_id, from_manager_id in lead_to_from_manager:
-        if not from_manager_id:
-            continue
-        grouped.setdefault(int(from_manager_id), []).append(int(lead_id))
-    if not grouped:
-        return 0
-
-    managers = {
-        manager.id: manager
-        for manager in User.objects.filter(id__in=grouped.keys(), is_active=True).only("id", "username", "first_name", "last_name", "role")
-    }
-    sample_lead_ids = [lead_ids[0] for lead_ids in grouped.values() if lead_ids]
     leads_map = {
         lead.id: lead
-        for lead in Lead.objects.select_related("manager").filter(id__in=sample_lead_ids)
+        for lead in Lead.objects.select_related("manager").filter(id__in=[lead_id for lead_id, _from_manager_id in unique_pairs])
+    }
+    managers = {
+        manager.id: manager
+        for manager in User.objects.filter(
+            id__in=[from_manager_id for _lead_id, from_manager_id in unique_pairs],
+            is_active=True,
+        ).only("id", "username", "first_name", "last_name", "role")
     }
 
-    created = 0
-    for from_manager_id, grouped_lead_ids in grouped.items():
+    recipient_map: dict[int, dict] = {}
+    for lead_id, from_manager_id in unique_pairs:
+        lead = leads_map.get(lead_id)
         manager = managers.get(from_manager_id)
-        if manager is None:
-            continue
-        sample_lead = leads_map.get(grouped_lead_ids[0])
-        if sample_lead is None:
+        if lead is None or manager is None:
             continue
 
         recipients = _resolve_lead_event_recipients(
             event_type=NotificationEvent.LEAD_UNASSIGNED,
-            lead=sample_lead,
+            lead=lead,
             primary_recipient_ids=[from_manager_id],
             manager_id_for_scope=from_manager_id,
             manager_role_for_scope=getattr(manager, "role", None),
+            excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
         )
-        if not recipients:
+        for recipient in recipients:
+            entry = recipient_map.setdefault(
+                recipient.id,
+                {
+                    "recipient": recipient,
+                    "lead_ids": set(),
+                    "from_manager_ids": set(),
+                },
+            )
+            entry["lead_ids"].add(lead_id)
+            entry["from_manager_ids"].add(from_manager_id)
+
+    created = 0
+    for entry in recipient_map.values():
+        lead_ids = sorted(entry["lead_ids"])
+        from_manager_ids = sorted(entry["from_manager_ids"])
+        if not lead_ids or not from_manager_ids:
             continue
 
-        sample_ids = grouped_lead_ids[:20]
-        lead_count = len(grouped_lead_ids)
-        status_breakdown = _collect_status_breakdown_for_leads(grouped_lead_ids)
+        lead_count = len(lead_ids)
+        status_breakdown = _collect_status_breakdown_for_leads(lead_ids)
         status_counts = {
             (row.get("status_code") or "NO_STATUS"): int(row.get("count") or 0)
             for row in status_breakdown
         }
-        from_username = _format_user_short(manager) if manager else f"пользователь {from_manager_id}"
-        batch_key = batch_id or f"{from_manager_id}:{lead_count}:{sample_ids[0]}:{sample_ids[-1]}"
+        if len(from_manager_ids) == 1:
+            from_manager = managers.get(from_manager_ids[0])
+            body = f"Снято с {_format_user_short(from_manager) if from_manager else f'пользователя {from_manager_ids[0]}'}"
+        else:
+            body = f"Снято у {len(from_manager_ids)} пользователей"
+        batch_key = batch_id or f"{lead_count}:{lead_ids[0]}:{lead_ids[-1]}"
 
-        for recipient in recipients:
-            if actor_user_id is not None and actor_user_id == recipient.id:
-                continue
-            item = emit(
-                NotificationEmitPayload(
-                    event_type=NotificationEvent.LEAD_UNASSIGNED,
-                    recipient_id=recipient.id,
-                    actor_user_id=actor_user_id,
-                    lead_id=None,
-                    title=f"Массовое снятие: {lead_count} лидов",
-                    body=f"Снято с {from_username}",
-                    payload={
-                        "batch_id": batch_id,
-                        "mode": "bulk_summary",
-                        "lead_count": lead_count,
-                        "from_manager_id": str(from_manager_id),
-                        "status_counts": status_counts,
-                        "status_breakdown": status_breakdown,
-                    },
-                    dedupe_key=f"lead_unassigned_bulk:{batch_key}:{recipient.id}",
-                )
+        item = emit(
+            NotificationEmitPayload(
+                event_type=NotificationEvent.LEAD_UNASSIGNED,
+                recipient_id=entry["recipient"].id,
+                actor_user_id=actor_user_id,
+                lead_id=None,
+                title=f"Массовое снятие: {lead_count} лидов",
+                body=body,
+                payload={
+                    "batch_id": batch_id,
+                    "mode": "bulk_summary",
+                    "lead_count": lead_count,
+                    "from_manager_id": str(from_manager_ids[0]) if len(from_manager_ids) == 1 else None,
+                    "from_manager_ids": [str(manager_id) for manager_id in from_manager_ids],
+                    "from_manager_count": len(from_manager_ids),
+                    "status_counts": status_counts,
+                    "status_breakdown": status_breakdown,
+                },
+                dedupe_key=f"lead_unassigned_bulk:{batch_key}:{entry['recipient'].id}",
             )
-            if item is not None:
-                created += 1
+        )
+        if item is not None:
+            created += 1
+    return created
+
+
+def emit_bulk_lead_status_changed_notification(
+    *,
+    lead_status_items: list[tuple[int, int | None, int | None]],
+    actor_user_id: int | None,
+    batch_id: str | None = None,
+) -> int:
+    unique_items = [
+        (int(lead_id), int(from_status_id) if from_status_id else None, int(to_status_id) if to_status_id else None)
+        for lead_id, from_status_id, to_status_id in dict.fromkeys(lead_status_items)
+        if to_status_id
+    ]
+    if not unique_items:
+        return 0
+
+    leads_map = {
+        lead.id: lead
+        for lead in Lead.objects.select_related("manager", "status").filter(id__in=[lead_id for lead_id, _from_status_id, _to_status_id in unique_items])
+    }
+    status_ids = {
+        status_id
+        for _lead_id, from_status_id, to_status_id in unique_items
+        for status_id in (from_status_id, to_status_id)
+        if status_id
+    }
+    statuses_map = {
+        status.id: status
+        for status in LeadStatus.objects.filter(id__in=status_ids).only(
+            "id",
+            "code",
+            "name",
+            "is_valid",
+            "work_bucket",
+            "conversion_bucket",
+        )
+    }
+
+    recipient_map: dict[int, dict] = {}
+    for lead_id, from_status_id, to_status_id in unique_items:
+        lead = leads_map.get(lead_id)
+        to_status = statuses_map.get(to_status_id) if to_status_id else None
+        from_status = statuses_map.get(from_status_id) if from_status_id else None
+        if lead is None or to_status is None:
+            continue
+        if not _is_important_status_change(from_status=from_status, to_status=to_status):
+            continue
+
+        recipients = _resolve_lead_event_recipients(
+            event_type=NotificationEvent.LEAD_STATUS_CHANGED,
+            lead=lead,
+            primary_recipient_ids=[],
+            excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
+        )
+        for recipient in recipients:
+            entry = recipient_map.setdefault(
+                recipient.id,
+                {
+                    "recipient": recipient,
+                    "lead_ids": set(),
+                    "to_status_ids": set(),
+                },
+            )
+            entry["lead_ids"].add(lead_id)
+            entry["to_status_ids"].add(to_status.id)
+
+    created = 0
+    for entry in recipient_map.values():
+        lead_ids = sorted(entry["lead_ids"])
+        to_status_ids = sorted(entry["to_status_ids"])
+        if not lead_ids or not to_status_ids:
+            continue
+
+        lead_count = len(lead_ids)
+        status_breakdown = _collect_status_breakdown_for_leads(lead_ids)
+        status_counts = {
+            (row.get("status_code") or "NO_STATUS"): int(row.get("count") or 0)
+            for row in status_breakdown
+        }
+        if len(to_status_ids) == 1:
+            to_status = statuses_map.get(to_status_ids[0])
+            body = f"Переведено в {(getattr(to_status, 'code', None) or 'НЕТ')}"
+        else:
+            body = f"Изменены статусы у {lead_count} лидов"
+        batch_key = batch_id or f"{lead_count}:{lead_ids[0]}:{lead_ids[-1]}"
+
+        item = emit(
+            NotificationEmitPayload(
+                event_type=NotificationEvent.LEAD_STATUS_CHANGED,
+                recipient_id=entry["recipient"].id,
+                actor_user_id=actor_user_id,
+                lead_id=None,
+                title=f"Массовая смена статуса: {lead_count} лидов",
+                body=body,
+                payload={
+                    "batch_id": batch_id,
+                    "mode": "bulk_summary",
+                    "lead_count": lead_count,
+                    "to_status_id": str(to_status_ids[0]) if len(to_status_ids) == 1 else None,
+                    "to_status_ids": [str(status_id) for status_id in to_status_ids],
+                    "status_counts": status_counts,
+                    "status_breakdown": status_breakdown,
+                },
+                dedupe_key=f"lead_status_changed_bulk:{batch_key}:{entry['recipient'].id}",
+            )
+        )
+        if item is not None:
+            created += 1
     return created
 
 
@@ -638,6 +758,7 @@ def emit_lead_status_changed_notification(
         event_type=NotificationEvent.LEAD_STATUS_CHANGED,
         lead=lead,
         primary_recipient_ids=[],
+        excluded_recipient_ids=[actor_user_id] if actor_user_id else None,
     )
     if not recipients or to_status is None:
         return None
@@ -709,6 +830,7 @@ def emit_deposit_created_notification(*, deposit_id: int, actor_user_id: int | N
         event_type=NotificationEvent.DEPOSIT_CREATED,
         lead=deposit.lead,
         primary_recipient_ids=[],
+        excluded_recipient_ids=[actor_user_id or deposit.creator_id],
     )
     if not recipients:
         return None
@@ -766,11 +888,10 @@ def emit_comment_added_notification(*, comment_id: int) -> Notification | None:
         event_type=NotificationEvent.COMMENT_ADDED,
         lead=comment.lead,
         primary_recipient_ids=[comment.lead.manager_id],
+        excluded_recipient_ids=[comment.author_id] if comment.author_id else None,
     )
     created_notification = None
     for recipient in recipients:
-        if comment.author_id and comment.author_id == recipient.id:
-            continue
         item = emit(
             NotificationEmitPayload(
                 event_type=NotificationEvent.COMMENT_ADDED,
@@ -836,9 +957,11 @@ def _resolve_lead_event_recipients(
     primary_recipient_ids: list[int] | None = None,
     manager_id_for_scope: int | None = None,
     manager_role_for_scope: str | None = None,
+    excluded_recipient_ids: list[int] | None = None,
 ) -> list:
     policy = get_or_create_policy(event_type)
     recipients_map = {}
+    excluded_ids = {int(recipient_id) for recipient_id in (excluded_recipient_ids or []) if recipient_id}
 
     primary_recipient_ids = primary_recipient_ids or []
     if primary_recipient_ids:
@@ -851,6 +974,8 @@ def _resolve_lead_event_recipients(
     settings_cache: dict[tuple[int, str], dict] = {}
     recipients = []
     for recipient in recipients_map.values():
+        if recipient.id in excluded_ids:
+            continue
         settings = _resolve_user_settings_cached(user=recipient, event_type=event_type, cache=settings_cache)
         if not settings["enabled"]:
             continue
@@ -897,8 +1022,15 @@ def _slot_for_overdue(*, now, next_contact_at, repeat_minutes: int) -> int:
     return int(delay_seconds // (repeat_minutes * 60))
 
 
+def _is_within_overdue_notification_window(*, now) -> bool:
+    local_now = timezone.localtime(now)
+    return 8 <= local_now.hour < 18
+
+
 def emit_next_contact_overdue_notifications(*, now=None, limit: int | None = None) -> int:
     now = now or timezone.now()
+    if not _is_within_overdue_notification_window(now=now):
+        return 0
     queryset = (
         Lead.objects.select_related("manager")
         .filter(

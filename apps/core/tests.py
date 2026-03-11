@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.contrib.auth import get_user_model
 from django.http import JsonResponse
@@ -162,6 +162,7 @@ class NotificationApiTests(APITestCase):
 
     def test_assign_and_comment_create_notifications(self):
         admin = User.objects.create_user(username="notif_admin", password="pass12345", role=UserRole.ADMIN)
+        watcher_admin = User.objects.create_user(username="notif_admin_watcher", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="notif_manager", password="pass12345", role=UserRole.MANAGER)
         manager_2 = User.objects.create_user(username="notif_manager_2", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Notif Partner", code="notif-partner")
@@ -173,6 +174,23 @@ class NotificationApiTests(APITestCase):
             phone="+15550888",
             custom_fields={},
         )
+        for user in (admin, watcher_admin):
+            NotificationPreference.objects.create(
+                user=user,
+                event_type="lead_assigned",
+                enabled=True,
+                watch_scope=NotificationPolicy.WatchScope.ALL,
+                repeat_minutes=15,
+                updated_by=user,
+            )
+            NotificationPreference.objects.create(
+                user=user,
+                event_type="lead_unassigned",
+                enabled=True,
+                watch_scope=NotificationPolicy.WatchScope.ALL,
+                repeat_minutes=15,
+                updated_by=user,
+            )
 
         self.client.force_authenticate(user=admin)
         with self.captureOnCommitCallbacks(execute=True):
@@ -186,6 +204,27 @@ class NotificationApiTests(APITestCase):
             Notification.objects.filter(
                 event_type="lead_assigned",
                 recipient=manager_2,
+                lead=lead,
+            ).exists()
+        )
+        self.assertTrue(
+            Notification.objects.filter(
+                event_type="lead_assigned",
+                recipient=watcher_admin,
+                lead=lead,
+            ).exists()
+        )
+        self.assertTrue(
+            Notification.objects.filter(
+                event_type="lead_unassigned",
+                recipient=watcher_admin,
+                lead=lead,
+            ).exists()
+        )
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=admin,
+                event_type__in=["lead_assigned", "lead_unassigned"],
                 lead=lead,
             ).exists()
         )
@@ -269,6 +308,114 @@ class NotificationApiTests(APITestCase):
         self.assertIsNone(assigned.lead_id)
         self.assertIsNone(unassigned.lead_id)
 
+    def test_bulk_assign_notifications_are_aggregated_for_watcher_across_multiple_previous_managers(self):
+        actor_admin = User.objects.create_user(username="notif_bulk_actor_multi", password="pass12345", role=UserRole.ADMIN)
+        watcher_admin = User.objects.create_user(username="notif_bulk_watcher_multi", password="pass12345", role=UserRole.ADMIN)
+        old_manager_1 = User.objects.create_user(username="notif_bulk_old_mgr_1", password="pass12345", role=UserRole.MANAGER)
+        old_manager_2 = User.objects.create_user(username="notif_bulk_old_mgr_2", password="pass12345", role=UserRole.MANAGER)
+        new_manager = User.objects.create_user(username="notif_bulk_new_mgr_multi", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Bulk Assign Partner Multi", code="bulk-assign-partner-multi")
+        status_new = LeadStatus.objects.create(code="BULK_ASSIGN_MULTI_NEW", name="Bulk Assign Multi New", is_default_for_new_leads=True)
+        lead_ids = []
+        for idx, owner in enumerate((old_manager_1, old_manager_1, old_manager_2, old_manager_2), start=1):
+            lead = Lead.objects.create(
+                partner=partner,
+                manager=owner,
+                status=status_new,
+                phone=f"+1555910{idx}",
+                custom_fields={},
+            )
+            lead_ids.append(lead.id)
+
+        NotificationPreference.objects.create(
+            user=watcher_admin,
+            event_type="lead_assigned",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.ALL,
+            repeat_minutes=15,
+            updated_by=watcher_admin,
+        )
+        NotificationPreference.objects.create(
+            user=watcher_admin,
+            event_type="lead_unassigned",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.ALL,
+            repeat_minutes=15,
+            updated_by=watcher_admin,
+        )
+
+        self.client.force_authenticate(user=actor_admin)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/v1/leads/records/bulk-assign-manager/",
+                {"lead_ids": lead_ids, "manager": new_manager.id, "reason": "bulk assign multi"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200)
+
+        assigned_notifications = Notification.objects.filter(recipient=watcher_admin, event_type="lead_assigned")
+        unassigned_notifications = Notification.objects.filter(recipient=watcher_admin, event_type="lead_unassigned")
+        self.assertEqual(assigned_notifications.count(), 1)
+        self.assertEqual(unassigned_notifications.count(), 1)
+        self.assertEqual(unassigned_notifications.first().payload.get("lead_count"), 4)
+        self.assertEqual(unassigned_notifications.first().payload.get("from_manager_count"), 2)
+
+    def test_bulk_status_change_creates_single_summary_notification_for_watcher(self):
+        actor_admin = User.objects.create_user(username="notif_bulk_status_actor", password="pass12345", role=UserRole.ADMIN)
+        watcher_admin = User.objects.create_user(username="notif_bulk_status_watcher", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(username="notif_bulk_status_manager", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Bulk Status Partner", code="bulk-status-partner")
+        status_work = LeadStatus.objects.create(
+            code="BULK_STATUS_WORK",
+            name="Bulk Status Work",
+            is_default_for_new_leads=True,
+            work_bucket=LeadStatus.WorkBucket.WORKING,
+            conversion_bucket=LeadStatus.ConversionBucket.IGNORE,
+        )
+        status_lost = LeadStatus.objects.create(
+            code="BULK_STATUS_LOST",
+            name="Bulk Status Lost",
+            is_valid=False,
+            work_bucket=LeadStatus.WorkBucket.NON_WORKING,
+            conversion_bucket=LeadStatus.ConversionBucket.LOST,
+        )
+        lead_ids = []
+        for idx in range(3):
+            lead = Lead.objects.create(
+                partner=partner,
+                manager=manager,
+                status=status_work,
+                phone=f"+1555920{idx}",
+                custom_fields={},
+            )
+            lead_ids.append(lead.id)
+
+        NotificationPreference.objects.create(
+            user=watcher_admin,
+            event_type="lead_status_changed",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.ALL,
+            repeat_minutes=15,
+            updated_by=watcher_admin,
+        )
+
+        self.client.force_authenticate(user=actor_admin)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/v1/leads/records/bulk-change-status/",
+                {"lead_ids": lead_ids, "to_status": status_lost.id, "reason": "bulk lost"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200)
+
+        notifications = Notification.objects.filter(recipient=watcher_admin, event_type="lead_status_changed")
+        self.assertEqual(notifications.count(), 1)
+        notification = notifications.first()
+        self.assertIsNone(notification.lead_id)
+        self.assertEqual(notification.payload.get("mode"), "bulk_summary")
+        self.assertEqual(notification.payload.get("lead_count"), 3)
+        self.assertEqual(notification.payload.get("to_status_id"), str(status_lost.id))
+
     def test_emit_next_contact_overdue_notifications_repeats_by_slot_and_skips_contacted(self):
         manager = User.objects.create_user(username="notif_overdue_manager", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Overdue Partner", code="overdue-partner")
@@ -302,6 +449,60 @@ class NotificationApiTests(APITestCase):
         self.assertEqual(
             Notification.objects.filter(event_type="next_contact_overdue", recipient=manager, lead=lead).count(),
             2,
+        )
+
+    def test_emit_next_contact_overdue_notifications_skips_outside_business_hours(self):
+        manager = User.objects.create_user(username="notif_overdue_night_manager", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Overdue Night Partner", code="overdue-night-partner")
+        status_work = LeadStatus.objects.create(
+            code="NOTIF_NIGHT_WORKING",
+            name="Notif Night Working",
+            is_default_for_new_leads=True,
+            work_bucket=LeadStatus.WorkBucket.WORKING,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            status=status_work,
+            phone="+15550778",
+            next_contact_at=timezone.make_aware(datetime(2026, 3, 11, 17, 0, 0)),
+            custom_fields={},
+        )
+
+        created = emit_next_contact_overdue_notifications(
+            now=timezone.make_aware(datetime(2026, 3, 11, 19, 0, 0))
+        )
+
+        self.assertEqual(created, 0)
+        self.assertFalse(
+            Notification.objects.filter(event_type="next_contact_overdue", recipient=manager, lead=lead).exists()
+        )
+
+    def test_emit_next_contact_overdue_notifications_allows_creation_at_business_hours_boundary(self):
+        manager = User.objects.create_user(username="notif_overdue_day_manager", password="pass12345", role=UserRole.MANAGER)
+        partner = Partner.objects.create(name="Overdue Day Partner", code="overdue-day-partner")
+        status_work = LeadStatus.objects.create(
+            code="NOTIF_DAY_WORKING",
+            name="Notif Day Working",
+            is_default_for_new_leads=True,
+            work_bucket=LeadStatus.WorkBucket.WORKING,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            status=status_work,
+            phone="+15550779",
+            next_contact_at=timezone.make_aware(datetime(2026, 3, 11, 7, 0, 0)),
+            custom_fields={},
+        )
+
+        created = emit_next_contact_overdue_notifications(
+            now=timezone.make_aware(datetime(2026, 3, 11, 8, 0, 0))
+        )
+
+        self.assertEqual(created, 1)
+        self.assertTrue(
+            Notification.objects.filter(event_type="next_contact_overdue", recipient=manager, lead=lead).exists()
         )
 
     def test_overdue_recipients_include_teamleader_and_admin_by_preference(self):

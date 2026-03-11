@@ -4282,6 +4282,47 @@ class LeadStatusCatalogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_deposit_stats_ftd_matrix_for_teamleader_includes_teamleader_deposits(self):
+        teamleader = User.objects.create_user(username="tl_dep_stats_matrix", password="pass12345", role=UserRole.TEAMLEADER)
+        other_teamleader = User.objects.create_user(
+            username="tl_dep_stats_matrix_other",
+            password="pass12345",
+            role=UserRole.TEAMLEADER,
+        )
+        manager = User.objects.create_user(username="manager_dep_stats_matrix_tl", password="pass12345", role=UserRole.MANAGER)
+        ret_user = User.objects.create_user(username="ret_dep_stats_matrix_tl", password="pass12345", role=UserRole.RET)
+        partner = Partner.objects.create(
+            name="Partner Deposit Stats Matrix TL",
+            code="partner-deposit-stats-matrix-tl",
+        )
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+19991219", custom_fields={})
+
+        own_ftd = LeadDeposit.objects.create(lead=lead, creator=teamleader, amount="80.00", type=LeadDeposit.Type.FTD)
+        other_tl_ftd = LeadDeposit.objects.create(
+            lead=lead,
+            creator=other_teamleader,
+            amount="90.00",
+            type=LeadDeposit.Type.FTD,
+        )
+        manager_ftd = LeadDeposit.objects.create(lead=lead, creator=manager, amount="70.00", type=LeadDeposit.Type.FTD)
+        LeadDeposit.objects.create(lead=lead, creator=ret_user, amount="60.00", type=LeadDeposit.Type.FTD)
+
+        self._set_deposit_created_at(own_ftd, timezone.make_aware(datetime(2026, 1, 15, 10, 0, 0)))
+        self._set_deposit_created_at(other_tl_ftd, timezone.make_aware(datetime(2026, 2, 15, 10, 0, 0)))
+        self._set_deposit_created_at(manager_ftd, timezone.make_aware(datetime(2026, 2, 18, 10, 0, 0)))
+
+        self._auth(teamleader)
+        response = self.client.get(
+            "/api/v1/leads/deposits/stats/ftd-matrix/?date_from=2026-01-01&date_to=2026-02-28"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_user_ids = {row["user"]["id"] for row in response.data["rows"]}
+        self.assertEqual(
+            returned_user_ids,
+            {str(teamleader.id), str(other_teamleader.id), str(manager.id)},
+        )
+
     def test_deposit_stats_non_ftd_matrix_aggregates_reload_deposit_and_amount(self):
         admin = User.objects.create_user(username="admin_dep_non_ftd_matrix", password="pass12345", role=UserRole.ADMIN)
         ivan = User.objects.create_user(username="ivan_dep_non_ftd", password="pass12345", role=UserRole.RET)
