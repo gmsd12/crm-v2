@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
-from apps.core.notifications import emit_manager_no_activity_notifications
+from apps.notifications.handlers.followups import emit_manager_no_activity_notifications
 
 
 class Command(BaseCommand):

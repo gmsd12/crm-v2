@@ -36,4 +36,4 @@ class User(AbstractUser):
         ]
 
     def __str__(self) -> str:
-        return self.username
+        return '{}'.format(self.last_name or self.username)

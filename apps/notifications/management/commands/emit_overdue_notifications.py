@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
-from apps.core.notifications import emit_next_contact_overdue_notifications
+from apps.notifications.handlers.followups import emit_next_contact_overdue_notifications
 
 
 class Command(BaseCommand):
@@ -15,3 +15,4 @@ class Command(BaseCommand):
         limit = options.get("limit") or None
         created = emit_next_contact_overdue_notifications(limit=limit)
         self.stdout.write(self.style.SUCCESS(f"Created overdue notifications: {created}"))
+

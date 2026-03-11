@@ -8,19 +8,21 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.test import APITestCase
 
-from apps.core.models import Notification, NotificationPolicy, NotificationPreference
-from apps.core.notifications import (
+from apps.notifications.handlers.alerts import emit_partner_duplicate_attempt_notification
+from apps.notifications.handlers.followups import (
+    emit_manager_no_activity_notifications,
+    emit_next_contact_overdue_notifications,
+)
+from apps.notifications.models import Notification, NotificationPolicy, NotificationPreference, NotificationWatchTarget
+from apps.notifications.policies import get_or_create_policy
+from apps.notifications.runtime import (
     NotificationEmitPayload,
     emit,
-    emit_manager_no_activity_notifications,
-    emit_partner_duplicate_attempt_notification,
-    emit_next_contact_overdue_notifications,
-    get_or_create_policy,
     process_due_notifications,
 )
 from apps.iam.models import UserRole
 from apps.leads.models import Lead, LeadDuplicateAttempt, LeadStatus
-from apps.partners.models import Partner, PartnerSource
+from apps.partners.models import Partner
 
 User = get_user_model()
 
@@ -527,8 +529,22 @@ class NotificationApiTests(APITestCase):
         )
 
         now = timezone.now()
+        NotificationPreference.objects.create(
+            user=teamleader,
+            event_type="next_contact_overdue",
+            enabled=True,
+            watch_scope=NotificationPolicy.WatchScope.TEAM,
+            repeat_minutes=15,
+            updated_by=teamleader,
+        )
+        NotificationWatchTarget.objects.create(
+            watcher=teamleader,
+            event_type="next_contact_overdue",
+            target_role=UserRole.MANAGER,
+        )
+
         created_slot_1 = emit_next_contact_overdue_notifications(now=now)
-        self.assertEqual(created_slot_1, 2)  # manager + teamleader by default policy
+        self.assertEqual(created_slot_1, 2)  # manager + teamleader via explicit watched role
 
         policy = NotificationPolicy.objects.get(event_type="next_contact_overdue")
         policy.apply_to_admins = True
@@ -943,7 +959,6 @@ class NotificationApiTests(APITestCase):
         admin = User.objects.create_user(username="notif_dup_admin", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="notif_dup_manager", password="pass12345", role=UserRole.MANAGER)
         partner = Partner.objects.create(name="Dup Partner", code="dup-partner")
-        source = PartnerSource.objects.create(partner=partner, code="SRC_DUP", name="Dup Source", is_active=True)
         status_new = LeadStatus.objects.create(code="DUP_NEW", name="Dup New", is_default_for_new_leads=True)
         lead = Lead.objects.create(
             partner=partner,
@@ -965,7 +980,7 @@ class NotificationApiTests(APITestCase):
         for idx in range(4):
             attempt = LeadDuplicateAttempt.objects.create(
                 partner=partner,
-                source=source,
+                source="SRC_DUP",
                 existing_lead=lead,
                 phone=f"+1555099{idx}",
                 full_name=f"Dup #{idx}",

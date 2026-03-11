@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from apps.core.models import Notification, NotificationPolicy, NotificationPreference
+from apps.iam.models import UserRole
+from apps.notifications.models import Notification, NotificationPolicy, NotificationPreference
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -14,7 +15,6 @@ class NotificationSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "event_type",
-            "channel",
             "status",
             "scheduled_for",
             "sent_at",
@@ -99,3 +99,20 @@ class NotificationPreferenceUpdateSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    watched_user_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
+    watched_roles = serializers.ListField(
+        child=serializers.ChoiceField(choices=UserRole.choices),
+        required=False,
+        allow_empty=True,
+    )
+
+    def validate(self, attrs):
+        if "watched_user_ids" in attrs:
+            attrs["watched_user_ids"] = list(dict.fromkeys(attrs.get("watched_user_ids") or []))
+        if "watched_roles" in attrs:
+            attrs["watched_roles"] = list(dict.fromkeys(attrs.get("watched_roles") or []))
+        return attrs

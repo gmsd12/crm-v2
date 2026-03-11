@@ -56,6 +56,8 @@ env = environ.Env(
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
     CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS=(float, 10.0),
     CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT=(int, 500),
+    CELERY_NOTIFICATIONS_OUTBOX_PROCESS_INTERVAL_SECONDS=(float, 15.0),
+    CELERY_NOTIFICATIONS_OUTBOX_PROCESS_LIMIT=(int, 200),
     CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS=(float, 300.0),
     CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT=(int, 500),
     CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS=(float, 120.0),
@@ -86,6 +88,7 @@ INSTALLED_APPS = [
     "apps.partners",
     "apps.leads",
     "apps.core",
+    "apps.notifications",
     "apps.iam",
 ]
 
@@ -184,6 +187,11 @@ CELERY_TASK_EAGER_PROPAGATES = True
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS = env.float("CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS", default=10.0)
 CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT = env.int("CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT", default=500)
+CELERY_NOTIFICATIONS_OUTBOX_PROCESS_INTERVAL_SECONDS = env.float(
+    "CELERY_NOTIFICATIONS_OUTBOX_PROCESS_INTERVAL_SECONDS",
+    default=15.0,
+)
+CELERY_NOTIFICATIONS_OUTBOX_PROCESS_LIMIT = env.int("CELERY_NOTIFICATIONS_OUTBOX_PROCESS_LIMIT", default=200)
 CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS = env.float("CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS", default=300.0)
 CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT = env.int("CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT", default=500)
 CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS = env.float(
@@ -193,17 +201,22 @@ CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS = env.float(
 CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT = env.int("CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT", default=500)
 CELERY_BEAT_SCHEDULE = {
     "notifications-process-due": {
-        "task": "apps.core.tasks.process_due_notifications_task",
+        "task": "apps.notifications.tasks.process_due_notifications_task",
         "schedule": CELERY_NOTIFICATIONS_PROCESS_DUE_INTERVAL_SECONDS,
         "args": (CELERY_NOTIFICATIONS_PROCESS_DUE_LIMIT,),
     },
+    "notifications-process-outbox": {
+        "task": "apps.notifications.tasks.process_pending_notification_outbox_events_task",
+        "schedule": CELERY_NOTIFICATIONS_OUTBOX_PROCESS_INTERVAL_SECONDS,
+        "args": (CELERY_NOTIFICATIONS_OUTBOX_PROCESS_LIMIT,),
+    },
     "notifications-emit-overdue": {
-        "task": "apps.core.tasks.emit_overdue_notifications_task",
+        "task": "apps.notifications.tasks.emit_overdue_notifications_task",
         "schedule": CELERY_NOTIFICATIONS_EMIT_OVERDUE_INTERVAL_SECONDS,
         "args": (CELERY_NOTIFICATIONS_EMIT_OVERDUE_LIMIT,),
     },
     "notifications-manager-no-activity": {
-        "task": "apps.core.tasks.emit_manager_no_activity_notifications_task",
+        "task": "apps.notifications.tasks.emit_manager_no_activity_notifications_task",
         "schedule": CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_INTERVAL_SECONDS,
         "args": (CELERY_NOTIFICATIONS_MANAGER_NO_ACTIVITY_LIMIT,),
     },

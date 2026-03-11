@@ -4,7 +4,7 @@ import re
 
 from django.utils import timezone
 from rest_framework import serializers
-from apps.core.notifications import emit_partner_duplicate_attempt_notification
+from apps.notifications.publishers import publish_partner_duplicate_attempt
 from apps.partners.models import Partner, PartnerToken
 from apps.leads.models import (
     Lead,
@@ -201,9 +201,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                         "email": attempt.email,
                     },
                 )
-                transaction.on_commit(
-                    lambda attempt_id=attempt.id: emit_partner_duplicate_attempt_notification(attempt_id=attempt_id)
-                )
+                publish_partner_duplicate_attempt(attempt_id=attempt.id)
                 duplicate_lead._was_created = False
                 duplicate_lead._duplicate_rejected = True
                 return duplicate_lead
@@ -250,9 +248,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                     "email": attempt.email,
                 },
             )
-            transaction.on_commit(
-                lambda attempt_id=attempt.id: emit_partner_duplicate_attempt_notification(attempt_id=attempt_id)
-            )
+            publish_partner_duplicate_attempt(attempt_id=attempt.id)
             duplicate_lead._was_created = False
             duplicate_lead._duplicate_rejected = True
             return duplicate_lead

@@ -31,16 +31,16 @@ from apps.iam.api.rbac_mixins import RBACActionMixin
 from apps.iam.api.rbac_permissions import RBACPermission
 from apps.iam.models import UserRole
 from apps.iam.rbac import Perm
-from apps.core.notifications import (
-    emit_bulk_lead_assigned_notification,
-    emit_bulk_lead_status_changed_notification,
-    emit_bulk_lead_unassigned_notification,
-    emit_comment_added_notification,
-    emit_deposit_created_notification,
-    emit_lead_assigned_notification,
-    emit_lead_status_changed_notification,
-    emit_lead_unassigned_notification,
-    reschedule_next_contact_planned_notifications,
+from apps.notifications.publishers import (
+    publish_bulk_lead_assigned,
+    publish_bulk_lead_status_changed,
+    publish_bulk_lead_unassigned,
+    publish_comment_added,
+    publish_deposit_created,
+    publish_lead_assigned,
+    publish_lead_status_changed,
+    publish_lead_unassigned,
+    publish_next_contact_planned_resync,
 )
 from apps.leads.attachment_validation import AttachmentValidationError, validate_uploaded_attachment
 from apps.leads.models import (
@@ -427,11 +427,9 @@ def _create_lead_deposit(
         payload_after=_deposit_payload(dep),
     )
     if int(dep.type) == int(LeadDeposit.Type.FTD):
-        transaction.on_commit(
-            lambda deposit_id=dep.id, actor_user_id=getattr(actor_user, "id", None): emit_deposit_created_notification(
-                deposit_id=deposit_id,
-                actor_user_id=actor_user_id,
-            )
+        publish_deposit_created(
+            deposit_id=dep.id,
+            actor_user_id=getattr(actor_user, "id", None),
         )
     return dep
 
@@ -1110,7 +1108,7 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
             payload_after=_comment_payload(comment),
         )
         comment_id = comment.id
-        transaction.on_commit(lambda comment_id=comment_id: emit_comment_added_notification(comment_id=comment_id))
+        publish_comment_added(comment_id=comment_id)
 
     def perform_update(self, serializer):
         self._assert_write_allowed(serializer.instance)
@@ -2342,9 +2340,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if post_save_updates:
             lead.save(update_fields=sorted(set(post_save_updates + ["updated_at"])))
         if lead.next_contact_at is not None:
-            transaction.on_commit(
-                lambda lead_id=lead.id: reschedule_next_contact_planned_notifications(lead_id=lead_id, remind_before_minutes=15)
-            )
+            publish_next_contact_planned_resync(lead_id=lead.id, remind_before_minutes=15)
         _log_status_audit(
             event_type=LeadAuditEvent.LEAD_CREATED,
             actor_user=request.user,
@@ -2371,9 +2367,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if post_save_updates:
             lead.save(update_fields=sorted(set(post_save_updates + ["updated_at"])))
         if before_next_contact_at != lead.next_contact_at:
-            transaction.on_commit(
-                lambda lead_id=lead.id: reschedule_next_contact_planned_notifications(lead_id=lead_id, remind_before_minutes=15)
-            )
+            publish_next_contact_planned_resync(lead_id=lead.id, remind_before_minutes=15)
         _log_status_audit(
             event_type=LeadAuditEvent.LEAD_UPDATED,
             actor_user=request.user,
@@ -2971,29 +2965,22 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 to_manager=manager,
             )
             if getattr(previous_manager, "id", None) != manager.id:
-                def _emit_assignment_notifications(
-                    *,
+                publish_lead_assigned(
                     lead_id=lead.id,
                     to_manager_id=manager.id,
                     actor_user_id=request.user.id,
                     from_manager_id=getattr(previous_manager, "id", None),
-                    manager_audit_id=getattr(manager_audit, "id", None),
-                ):
-                    emit_lead_assigned_notification(
-                        lead_id=lead_id,
-                        to_manager_id=to_manager_id,
-                        actor_user_id=actor_user_id,
-                        from_manager_id=from_manager_id,
+                    audit_log_id=getattr(manager_audit, "id", None),
+                    suppress_actor_watcher=True,
+                )
+                if getattr(previous_manager, "id", None):
+                    publish_lead_unassigned(
+                        lead_id=lead.id,
+                        from_manager_id=previous_manager.id,
+                        actor_user_id=request.user.id,
+                        audit_log_id=getattr(manager_audit, "id", None),
+                        suppress_actor_watcher=True,
                     )
-                    if from_manager_id:
-                        emit_lead_unassigned_notification(
-                            lead_id=lead_id,
-                            from_manager_id=from_manager_id,
-                            actor_user_id=actor_user_id,
-                            audit_log_id=manager_audit_id,
-                        )
-
-                transaction.on_commit(_emit_assignment_notifications)
             if set_as_first_manager:
                 _log_first_manager_audit(
                     lead=lead,
@@ -3049,13 +3036,11 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 to_manager=None,
             )
             if getattr(previous_manager, "id", None):
-                transaction.on_commit(
-                    lambda lead_id=lead.id, from_manager_id=previous_manager.id, actor_user_id=request.user.id, manager_audit_id=getattr(manager_audit, "id", None): emit_lead_unassigned_notification(
-                        lead_id=lead_id,
-                        from_manager_id=from_manager_id,
-                        actor_user_id=actor_user_id,
-                        audit_log_id=manager_audit_id,
-                    )
+                publish_lead_unassigned(
+                    lead_id=lead.id,
+                    from_manager_id=previous_manager.id,
+                    actor_user_id=request.user.id,
+                    audit_log_id=getattr(manager_audit, "id", None),
                 )
 
             response_payload = LeadSerializer(lead).data
@@ -3189,31 +3174,31 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_body=response_payload,
             )
             if assignment_notification_items:
-                def _emit_bulk_assign_notifications(items=tuple(assignment_notification_items)):
-                    lead_ids = [lead_id for lead_id, _to_manager_id, _actor_user_id, _from_manager_id, _manager_audit_id in items]
-                    from_manager_ids = [
+                publish_bulk_lead_assigned(
+                    lead_ids=[
+                        lead_id
+                        for lead_id, _to_manager_id, _actor_user_id, _from_manager_id, _manager_audit_id in assignment_notification_items
+                    ],
+                    to_manager_id=manager.id,
+                    actor_user_id=request.user.id,
+                    from_manager_ids=[
                         from_manager_id
-                        for _lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in items
+                        for _lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in assignment_notification_items
                         if from_manager_id
-                    ]
-                    emit_bulk_lead_assigned_notification(
-                        lead_ids=lead_ids,
-                        to_manager_id=manager.id,
-                        actor_user_id=request.user.id,
-                        from_manager_ids=from_manager_ids,
-                        batch_id=batch_id,
-                    )
-                    emit_bulk_lead_unassigned_notification(
-                        lead_to_from_manager=[
-                            (lead_id, from_manager_id)
-                            for lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in items
-                            if from_manager_id
-                        ],
-                        actor_user_id=request.user.id,
-                        batch_id=batch_id,
-                    )
-
-                transaction.on_commit(_emit_bulk_assign_notifications)
+                    ],
+                    batch_id=batch_id,
+                    suppress_actor_watcher=True,
+                )
+                publish_bulk_lead_unassigned(
+                    lead_to_from_manager=[
+                        (lead_id, from_manager_id)
+                        for lead_id, _to_manager_id, _actor_user_id, from_manager_id, _manager_audit_id in assignment_notification_items
+                        if from_manager_id
+                    ],
+                    actor_user_id=request.user.id,
+                    batch_id=batch_id,
+                    suppress_actor_watcher=True,
+                )
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -3300,14 +3285,14 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_body=response_payload,
             )
             if unassign_notification_items:
-                def _emit_bulk_unassign_notifications(items=tuple(unassign_notification_items)):
-                    emit_bulk_lead_unassigned_notification(
-                        lead_to_from_manager=[(lead_id, from_manager_id) for lead_id, from_manager_id, _actor_user_id, _manager_audit_id in items],
-                        actor_user_id=request.user.id,
-                        batch_id=batch_id,
-                    )
-
-                transaction.on_commit(_emit_bulk_unassign_notifications)
+                publish_bulk_lead_unassigned(
+                    lead_to_from_manager=[
+                        (lead_id, from_manager_id)
+                        for lead_id, from_manager_id, _actor_user_id, _manager_audit_id in unassign_notification_items
+                    ],
+                    actor_user_id=request.user.id,
+                    batch_id=batch_id,
+                )
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -3380,14 +3365,12 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 payload_before=payload_before,
                 payload_after=payload_after,
             )
-            transaction.on_commit(
-                lambda lead_id=lead.id, from_status_id=getattr(from_status, "id", None), to_status_id=to_status.id, actor_user_id=request.user.id, status_audit_id=getattr(status_audit, "id", None): emit_lead_status_changed_notification(
-                    lead_id=lead_id,
-                    from_status_id=from_status_id,
-                    to_status_id=to_status_id,
-                    actor_user_id=actor_user_id,
-                    audit_log_id=status_audit_id,
-                )
+            publish_lead_status_changed(
+                lead_id=lead.id,
+                from_status_id=getattr(from_status, "id", None),
+                to_status_id=to_status.id,
+                actor_user_id=request.user.id,
+                audit_log_id=getattr(status_audit, "id", None),
             )
 
             response_payload = LeadSerializer(lead).data
@@ -3525,16 +3508,13 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
                 response_body=response_payload,
             )
             if status_notification_items:
-                def _emit_bulk_status_notifications(items=tuple(status_notification_items)):
-                    emit_bulk_lead_status_changed_notification(
-                        lead_status_items=[
-                            (lead_id, from_status_id, to_status_id)
-                            for lead_id, from_status_id, to_status_id, _actor_user_id, _status_audit_id in items
-                        ],
-                        actor_user_id=request.user.id,
-                        batch_id=batch_id,
-                    )
-
-                transaction.on_commit(_emit_bulk_status_notifications)
+                publish_bulk_lead_status_changed(
+                    lead_status_items=[
+                        (lead_id, from_status_id, to_status_id)
+                        for lead_id, from_status_id, to_status_id, _actor_user_id, _status_audit_id in status_notification_items
+                    ],
+                    actor_user_id=request.user.id,
+                    batch_id=batch_id,
+                )
 
         return Response(response_payload, status=status.HTTP_200_OK)

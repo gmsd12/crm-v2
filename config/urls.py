@@ -7,6 +7,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("media/<path:file_path>", protected_media, name="protected-media"),
     path("api/", include("apps.core.api.urls")),
+    path("api/", include("apps.notifications.api.urls")),
     path("api/v1/", include("apps.iam.api.urls")),
     path("api/v1/", include("apps.partners.api.urls")),
     path("api/v1/", include("apps.leads.api.urls")),
