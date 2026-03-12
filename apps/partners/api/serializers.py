@@ -138,13 +138,14 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         partner_auth = request.partner_auth
 
         token_bound_source = partner_auth.source
-        source = (attrs.get("source") or "").strip()
+        requested_source = (attrs.get("source") or "").strip()
 
         if token_bound_source:
             # токен привязан к source-строке => игнорируем source из тела
             attrs["_source"] = token_bound_source
         else:
-            attrs["_source"] = source
+            attrs["_source"] = requested_source
+        attrs["_requested_source"] = requested_source
 
         phone = (attrs.get("phone") or "").strip()
         email = (attrs.get("email") or "").strip()
@@ -160,11 +161,24 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         attrs["full_name"] = (attrs.get("full_name") or "").strip()
         return attrs
 
+    @staticmethod
+    def _duplicate_echo_payload(*, requested_source: str, validated_data: dict) -> dict:
+        return {
+            "source": requested_source,
+            "geo": validated_data.get("geo") or "",
+            "age": validated_data.get("age"),
+            "full_name": validated_data.get("full_name") or "",
+            "phone": validated_data.get("phone") or "",
+            "email": validated_data.get("email") or "",
+            "custom_fields": validated_data.get("custom_fields"),
+        }
+
     def create(self, validated_data):
         request = self.context["request"]
         partner_auth = request.partner_auth
 
         source = validated_data.pop("_source", None)
+        requested_source = validated_data.pop("_requested_source", "")
         validated_data.pop("source", None)
 
         partner = partner_auth.partner
@@ -204,6 +218,10 @@ class LeadCreateSerializer(serializers.ModelSerializer):
                 publish_partner_duplicate_attempt(attempt_id=attempt.id)
                 duplicate_lead._was_created = False
                 duplicate_lead._duplicate_rejected = True
+                duplicate_lead._partner_response_payload = self._duplicate_echo_payload(
+                    requested_source=requested_source,
+                    validated_data=validated_data,
+                )
                 return duplicate_lead
 
         try:
@@ -251,10 +269,15 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             publish_partner_duplicate_attempt(attempt_id=attempt.id)
             duplicate_lead._was_created = False
             duplicate_lead._duplicate_rejected = True
+            duplicate_lead._partner_response_payload = self._duplicate_echo_payload(
+                requested_source=requested_source,
+                validated_data=validated_data,
+            )
             return duplicate_lead
 
 
 class LeadListSerializer(serializers.ModelSerializer):
+    source = serializers.CharField(read_only=True)
     status = serializers.SerializerMethodField()
 
     class Meta:
@@ -262,13 +285,13 @@ class LeadListSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "source",
+            "received_at",
             "geo",
             "age",
             "status",
             "full_name",
             "phone",
             "email",
-            "priority",
             "custom_fields",
         ]
 
@@ -279,6 +302,5 @@ class LeadListSerializer(serializers.ModelSerializer):
             "id": str(obj.status_id),
             "code": obj.status.code,
             "name": obj.status.name,
-            "color": obj.status.color,
             "work_bucket": obj.status.work_bucket,
         }

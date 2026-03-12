@@ -89,15 +89,21 @@ class PartnerTokenAdminViewSet(_BasePartnerCatalogAdminViewSet):
 
 
 class LeadFilter(FilterSet):
+    class CharInFilter(filters.BaseInFilter, filters.CharFilter):
+        pass
+
     source = filters.CharFilter(field_name="source", lookup_expr="iexact")
     phone = filters.CharFilter(field_name="phone", lookup_expr="exact")
     age = filters.NumberFilter(field_name="age", lookup_expr="exact")
+    age_from = filters.NumberFilter(field_name="age", lookup_expr="gte")
+    age_to = filters.NumberFilter(field_name="age", lookup_expr="lte")
+    status__in = CharInFilter(field_name="status__code", lookup_expr="in")
     received_from = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="gte")
     received_to = filters.IsoDateTimeFilter(field_name="received_at", lookup_expr="lte")
 
     class Meta:
         model = Lead
-        fields = ["phone", "age", "source"]
+        fields = ["phone", "age", "age_from", "age_to", "source", "status__in"]
 
 
 class PartnerLeadViewSet(
@@ -147,8 +153,8 @@ class PartnerLeadViewSet(
         created = getattr(lead, "_was_created", True)
         duplicate_rejected = getattr(lead, "_duplicate_rejected", False)
 
-        out = LeadListSerializer(lead).data
+        out = getattr(lead, "_partner_response_payload", None) or LeadListSerializer(lead).data
         out["created"] = created
         out["duplicate_rejected"] = duplicate_rejected
 
-        return Response(out, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(out, status=status.HTTP_201_CREATED if created else status.HTTP_409_CONFLICT)

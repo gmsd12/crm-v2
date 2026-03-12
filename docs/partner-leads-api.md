@@ -1,41 +1,80 @@
-# Partner Leads API (v1)
+# Partner Leads API
 
-Ниже минимальная инструкция для партнера: как получить токен, отправить лид, проверить что лид принят.
+Внешняя документация для партнёра.
 
-## 1) Аутентификация
+Токен партнёру выдаёт CRM вручную. В этой документации описано только использование уже выданного токена и работа с лидами.
+
+## 1. Аутентификация
 
 Передавай токен в одном из заголовков:
 
-- `X-Partner-Token: <TOKEN>` (рекомендуется)
-- или `Authorization: Bearer <TOKEN>`
+- `X-Partner-Token: <TOKEN>` — рекомендуемый вариант
+- `Authorization: Bearer <TOKEN>`
 
-Если токен неверный/просрочен/отозван — `401`.
+Если токен невалиден, отключён или просрочен, API вернёт `401 Unauthorized`.
 
-## 2) Доступные endpoint'ы
+## 2. Доступные endpoint'ы
 
-- `GET /api/v1/partner/sources/` — список доступных `source_code` для токена.
-- `POST /api/v1/partner/leads/` — заливка лида.
-- `GET /api/v1/partner/leads/` — список лидов партнера (с пагинацией).
-- `GET /api/v1/partner/leads/{id}/` — один лид партнера.
+- `POST /api/v1/partner/leads/` — отправить нового лида
+- `GET /api/v1/partner/leads/` — получить список своих лидов
+- `GET /api/v1/partner/leads/{id}/` — получить одного своего лида
 
-## 3) Создание лида
+
+
+## 3. Формат лида в ответе
+
+Поля, которые API возвращает для созданного/полученного лида:
+
+```json
+{
+  "id": "123",
+  "source": "google",
+  "received_at": "2026-03-12T10:30:00Z",
+  "geo": "US",
+  "age": 27,
+  "status": {
+    "id": "1",
+    "code": "NEW",
+    "name": "Новый",
+    "work_bucket": "WORKING"
+  },
+  "full_name": "John Doe",
+  "phone": "+15550000001",
+  "email": "john@example.com",
+  "custom_fields": {
+    "campaign": "spring_sale"
+  }
+}
+```
+
+Примечания:
+
+- `priority` в ответе не возвращается
+- `status` может быть `null`, если у лида нет статуса
+- `custom_fields` может быть `null`
+
+## 4. Создание лида
 
 `POST /api/v1/partner/leads/`
 
 ### Поля запроса
 
-- `phone` (string, обязательно) — уникальный телефон.
-- `source_code` (string, опционально) — код источника.
-- `geo` (string, опционально) — 2 буквы в upper-case (`US`, `DE`, `CH`).
-- `full_name` (string, опционально)
-- `email` (string, опционально)
-- `priority` (int, опционально; по умолчанию 20)
-- `custom_fields` (object, опционально)
+- `phone` — string, обязательно
+- `source` — string, опционально
+- `geo` — string, опционально, 2 заглавные буквы (`US`, `DE`, `CH`)
+- `age` — integer, опционально
+- `full_name` — string, опционально
+- `email` — string, опционально
+- `priority` — integer, опционально
+- `custom_fields` — object или `null`, опционально
 
-Важно:
-- если токен привязан к source, `source_code` из запроса игнорируется;
-- дубликат определяется по `phone`;
-- дубликат не создается как новый лид, а возвращается с флагом `duplicate_rejected=true`.
+Правила:
+
+- если токен привязан к конкретному `source`, значение `source` из запроса игнорируется
+- дубликат определяется по `phone`
+- при дубликате новый лид не создаётся
+- в CRM попытка дубликата сохраняется как отдельный факт
+- наружу при дубликате возвращаются только данные из текущей попытки партнёра, без данных уже существующего лида
 
 ### Пример запроса
 
@@ -44,8 +83,9 @@ curl -X POST http://localhost:8000/api/v1/partner/leads/ \
   -H "Content-Type: application/json" \
   -H "X-Partner-Token: <TOKEN>" \
   -d '{
-    "source_code": "google",
+    "source": "google",
     "geo": "US",
+    "age": 27,
     "full_name": "John Doe",
     "phone": "+15550000001",
     "email": "john@example.com",
@@ -57,59 +97,175 @@ curl -X POST http://localhost:8000/api/v1/partner/leads/ \
   }'
 ```
 
-### Успешный ответ (новый лид)
+### Успешный ответ: новый лид
 
-- HTTP `201`
-- в теле:
-  - `created: true`
-  - `duplicate_rejected: false`
+HTTP `201 Created`
 
-### Успешный ответ (дубликат)
+```json
+{
+  "id": "123",
+  "source": "google",
+  "received_at": "2026-03-12T10:30:00Z",
+  "geo": "US",
+  "age": 27,
+  "status": {
+    "id": "1",
+    "code": "NEW",
+    "name": "Новый",
+    "work_bucket": "WORKING"
+  },
+  "full_name": "John Doe",
+  "phone": "+15550000001",
+  "email": "john@example.com",
+  "custom_fields": {
+    "campaign": "spring_sale",
+    "landing": "lp-01"
+  },
+  "created": true,
+  "duplicate_rejected": false
+}
+```
 
-- HTTP `200`
-- в теле:
-  - `created: false`
-  - `duplicate_rejected: true`
+### Ответ: дубликат
 
-## 4) Фильтры списка лидов
+HTTP `409 Conflict`
+
+```json
+{
+  "source": "google",
+  "geo": "US",
+  "age": 27,
+  "full_name": "John Doe",
+  "phone": "+15550000001",
+  "email": "john@example.com",
+  "custom_fields": {
+    "campaign": "spring_sale",
+    "landing": "lp-01"
+  },
+  "created": false,
+  "duplicate_rejected": true
+}
+```
+
+Важно:
+
+- в duplicate-ответе нет `id`
+- в duplicate-ответе нет `status`
+- в duplicate-ответе нет `received_at`
+- в duplicate-ответе нет данных уже существующего лида
+
+## 5. Список лидов
 
 `GET /api/v1/partner/leads/`
 
-Поддерживаются:
+Возвращает пагинированный список лидов текущего партнёра.
 
-- `source=<source_code>`
+### Поддерживаемые фильтры
+
+- `source=<value>`
 - `phone=<exact_phone>`
+- `age=<number>`
+- `age_from=<number>`
+- `age_to=<number>`
+- `status__in=<STATUS_CODE_1,STATUS_CODE_2,...>`
 - `received_from=<ISO_DATETIME>`
 - `received_to=<ISO_DATETIME>`
-- `page=<n>`
-- `page_size=<n>` (ограничен настройкой сервера, по умолчанию max 200)
+- `page=<number>`
+- `page_size=<number>`
+- `ordering=<field>`
 
-Пример:
+### Формат даты для `received_from` и `received_to`
+
+Используй ISO 8601 datetime.
+
+Подходящие примеры:
+
+- `2026-03-12T10:30:00Z`
+- `2026-03-12T10:30:00+00:00`
+- `2026-03-12T13:30:00+03:00`
+
+Рекомендуется всегда передавать timezone явно: либо `Z`, либо смещение вида `+03:00`.
+
+Важно для query string:
+
+- знак `+` в URL должен быть экранирован как `%2B`
+- иначе многие клиенты превратят `+` в пробел, и API не сможет распарсить дату
+
+Пример в URL:
+
+- `received_from=2026-03-12T13:30:00%2B03:00`
+
+### Поддерживаемая сортировка
+
+- `id`
+- `received_at`
+- `age`
+- `phone`
+- `full_name`
+- `email`
+- `priority`
+- `source`
+- `status__code`
+
+Для обратной сортировки используй префикс `-`, например `ordering=-received_at`.
+
+### Пример запроса
 
 ```bash
-curl "http://localhost:8000/api/v1/partner/leads/?source=google&page=1&page_size=50" \
+curl "http://localhost:8000/api/v1/partner/leads/?source=google&age_from=20&age_to=35&status__in=NEW,WON&page=1&page_size=50&ordering=-received_at" \
   -H "X-Partner-Token: <TOKEN>"
 ```
 
-## 5) Ошибки
+### Пример ответа
 
-Стандартные кейсы:
-
-- `400` — ошибка валидации (`phone` пустой, неверный `geo`, неизвестный `source_code`).
-- `401` — токен невалиден/неактивен/просрочен.
-- `429` — превышен лимит запросов токена.
-
-## 6) Быстрый локальный демо-сценарий (для команды CRM)
-
-Команда ниже создаст 5 партнеров, токены и загрузит по 5 лидов от каждого через реальный Partner API:
-
-```bash
-.venv/bin/python manage.py simulate_partner_uploads --partners 5 --leads-per-partner 5
+```json
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": "124",
+      "source": "google",
+      "received_at": "2026-03-12T10:30:00Z",
+      "geo": "US",
+      "age": 27,
+      "status": {
+        "id": "1",
+        "code": "NEW",
+        "name": "Новый",
+        "work_bucket": "WORKING"
+      },
+      "full_name": "John Doe",
+      "phone": "+15550000001",
+      "email": "john@example.com",
+      "custom_fields": {
+        "campaign": "spring_sale"
+      }
+    }
+  ]
+}
 ```
 
-После выполнения команда выведет:
+## 6. Один лид
 
-- список партнеров,
-- токен каждого партнера,
-- сколько лидов создано,
-- сколько ушло в duplicate reject.
+`GET /api/v1/partner/leads/{id}/`
+
+Возвращает одного лида текущего партнёра в том же формате, что и элементы в списке.
+
+### Пример
+
+```bash
+curl http://localhost:8000/api/v1/partner/leads/124/ \
+  -H "X-Partner-Token: <TOKEN>"
+```
+
+## 7. Ошибки
+
+Типовые ответы:
+
+- `400 Bad Request` — ошибка валидации, например пустой `phone` или неверный `geo`
+- `401 Unauthorized` — токен невалиден, отключён или просрочен
+- `404 Not Found` — лид с таким `id` не найден в рамках текущего партнёра
+- `409 Conflict` — duplicate reject по `phone`
+- `429 Too Many Requests` — превышен лимит запросов

@@ -233,7 +233,7 @@ class Command(BaseCommand):
                 HTTP_X_PARTNER_TOKEN=raw_token,
                 HTTP_HOST="localhost",
             )
-            if response.status_code not in {200, 201}:
+            if response.status_code not in {201, 409}:
                 body = getattr(response, "data", None)
                 if body is None:
                     body = response.content.decode("utf-8", errors="ignore")

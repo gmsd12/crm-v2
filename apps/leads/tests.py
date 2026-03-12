@@ -4662,7 +4662,7 @@ class LeadStatusCatalogApiTests(APITestCase):
             HTTP_X_PARTNER_TOKEN=raw_token,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertFalse(response.data["created"])
         self.assertTrue(response.data["duplicate_rejected"])
         self.assertEqual(Lead.objects.filter(partner=partner).count(), 1)
