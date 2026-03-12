@@ -49,7 +49,6 @@
 
 Примечания:
 
-- `priority` в ответе не возвращается
 - `status` может быть `null`, если у лида нет статуса
 - `custom_fields` может быть `null`
 
@@ -65,11 +64,11 @@
 - `age` — integer, опционально
 - `full_name` — string, опционально
 - `email` — string, опционально
-- `priority` — integer, опционально
 - `custom_fields` — object или `null`, опционально
 
 Правила:
 
+- `source` — это обычная строка, не id и не справочник
 - если токен привязан к конкретному `source`, значение `source` из запроса игнорируется
 - дубликат определяется по `phone`
 - при дубликате новый лид не создаётся
@@ -89,7 +88,6 @@ curl -X POST http://localhost:8000/api/v1/partner/leads/ \
     "full_name": "John Doe",
     "phone": "+15550000001",
     "email": "john@example.com",
-    "priority": 20,
     "custom_fields": {
       "campaign": "spring_sale",
       "landing": "lp-01"
@@ -203,7 +201,6 @@ HTTP `409 Conflict`
 - `phone`
 - `full_name`
 - `email`
-- `priority`
 - `source`
 - `status__code`
 

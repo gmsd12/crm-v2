@@ -219,7 +219,6 @@ class Command(BaseCommand):
                 "full_name": full_name,
                 "phone": phone,
                 "email": email,
-                "priority": 20,
                 "custom_fields": {
                     "campaign": f"campaign_{partner_idx:02d}",
                     "landing": f"https://{partner.code}.example.com/lp-{(i % 3) + 1}",

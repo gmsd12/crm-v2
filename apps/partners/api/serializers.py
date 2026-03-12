@@ -120,7 +120,6 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             "full_name",
             "phone",
             "email",
-            "priority",
             "custom_fields",
             "received_at",
         ]

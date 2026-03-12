@@ -1,15 +1,15 @@
-from rest_framework.test import APITestCase
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.core.cache import cache
-from django.contrib.auth import get_user_model
+from datetime import timedelta
 from unittest.mock import patch
 
-from datetime import timedelta
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.utils import timezone
+from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.iam.models import UserRole
 from apps.leads.models import Lead, LeadStatus
-from apps.partners.models import Partner, PartnerSource, PartnerToken
+from apps.partners.models import Partner, PartnerToken
 from apps.partners.pagination import PartnerLeadPagination
 from apps.partners.throttling import PartnerTokenRateThrottle
 
@@ -19,29 +19,22 @@ User = get_user_model()
 class PartnerLeadApiTests(APITestCase):
     def setUp(self):
         self.partner = Partner.objects.create(name="Acme", code="acme")
-        self.source = PartnerSource.objects.create(
-            partner=self.partner,
-            name="Google",
-            code="google",
-            is_active=True,
-        )
         self.raw_token = "tok_live_partner_test_1234567890"
         self.token = PartnerToken.build(partner=self.partner, raw_token=self.raw_token, name="test")
         self.token.save()
 
     def test_partner_lead_create_rejects_duplicate_phone(self):
-        url = "/api/v1/partner/leads/"
         payload = {
             "phone": "+155500001",
-            "source": self.source.code,
+            "source": "google",
             "full_name": "John Doe",
             "email": "lead@example.com",
             "custom_fields": {"channel": "google"},
         }
         headers = {"HTTP_X_PARTNER_TOKEN": self.raw_token}
 
-        first = self.client.post(url, payload, format="json", **headers)
-        second = self.client.post(url, payload, format="json", **headers)
+        first = self.client.post("/api/v1/partner/leads/", payload, format="json", **headers)
+        second = self.client.post("/api/v1/partner/leads/", payload, format="json", **headers)
 
         self.assertEqual(first.status_code, 201)
         self.assertTrue(first.data["created"])
@@ -53,7 +46,7 @@ class PartnerLeadApiTests(APITestCase):
         self.assertEqual(
             second.data,
             {
-                "source": self.source.code,
+                "source": "google",
                 "geo": "",
                 "age": None,
                 "full_name": "John Doe",
@@ -115,7 +108,7 @@ class PartnerLeadApiTests(APITestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data["error"]["code"], "authentication_failed")
 
-    def test_partner_lead_with_unknown_source_returns_400(self):
+    def test_partner_can_send_arbitrary_source_string(self):
         response = self.client.post(
             "/api/v1/partner/leads/",
             {"phone": "+155500099", "source": "unknown", "email": "unknown@example.com"},
@@ -123,8 +116,41 @@ class PartnerLeadApiTests(APITestCase):
             HTTP_X_PARTNER_TOKEN=self.raw_token,
         )
 
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["source"], "unknown")
+        self.assertEqual(Lead.objects.get(phone="+155500099").source, "unknown")
+
+    def test_token_bound_source_overrides_request_source(self):
+        token = PartnerToken.build(
+            partner=self.partner,
+            raw_token="tok_live_partner_bound_source_1234567890",
+            name="bound",
+            source="bound_source",
+        )
+        token.save()
+
+        response = self.client.post(
+            "/api/v1/partner/leads/",
+            {"phone": "+155500199", "source": "request_source"},
+            format="json",
+            HTTP_X_PARTNER_TOKEN="tok_live_partner_bound_source_1234567890",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["source"], "bound_source")
+        self.assertEqual(Lead.objects.get(phone="+155500199").source, "bound_source")
+
+    def test_partner_cannot_send_priority(self):
+        response = self.client.post(
+            "/api/v1/partner/leads/",
+            {"phone": "+155500299", "priority": 20},
+            format="json",
+            HTTP_X_PARTNER_TOKEN=self.raw_token,
+        )
+
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertIn("priority", response.data["error"]["details"])
 
     def test_partner_can_set_geo_on_create(self):
         response = self.client.post(
@@ -206,18 +232,6 @@ class PartnerLeadApiTests(APITestCase):
 class PartnerLeadFilterApiTests(APITestCase):
     def setUp(self):
         self.partner = Partner.objects.create(name="Acme", code="acme-filters")
-        self.google_source = PartnerSource.objects.create(
-            partner=self.partner,
-            name="Google",
-            code="google",
-            is_active=True,
-        )
-        self.fb_source = PartnerSource.objects.create(
-            partner=self.partner,
-            name="Facebook",
-            code="facebook",
-            is_active=True,
-        )
         self.raw_token = "tok_live_partner_filters_1234567890"
         self.token = PartnerToken.build(partner=self.partner, raw_token=self.raw_token, name="filters")
         self.token.save()
@@ -238,7 +252,7 @@ class PartnerLeadFilterApiTests(APITestCase):
         now = timezone.now()
         self.lead_google = Lead.objects.create(
             partner=self.partner,
-            source=self.google_source,
+            source="google",
             status=self.status_new,
             phone="+19990101",
             age=21,
@@ -247,7 +261,7 @@ class PartnerLeadFilterApiTests(APITestCase):
         )
         self.lead_facebook = Lead.objects.create(
             partner=self.partner,
-            source=self.fb_source,
+            source="facebook",
             status=self.status_won,
             phone="+19990102",
             age=35,
@@ -256,7 +270,7 @@ class PartnerLeadFilterApiTests(APITestCase):
         )
         self.lead_without_source = Lead.objects.create(
             partner=self.partner,
-            source=None,
+            source="",
             phone="+19990103",
             custom_fields={"name": "No Source Lead"},
             received_at=now,
@@ -265,7 +279,7 @@ class PartnerLeadFilterApiTests(APITestCase):
         other_partner = Partner.objects.create(name="Other", code="other-filters")
         Lead.objects.create(
             partner=other_partner,
-            source=None,
+            source="google",
             phone="+19990200",
             custom_fields={"name": "Foreign Lead"},
             received_at=now - timedelta(hours=1),
@@ -341,6 +355,12 @@ class PartnerLeadFilterApiTests(APITestCase):
             ],
         )
 
+    def test_partner_leads_list_rejects_priority_ordering(self):
+        response = self.client.get("/api/v1/partner/leads/", {"ordering": "priority"}, **self.headers)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["error"]["code"], "validation_error")
+
     def test_list_has_pagination_shape(self):
         response = self.client.get("/api/v1/partner/leads/", {}, **self.headers)
 
@@ -377,103 +397,6 @@ class PartnerLeadFilterApiTests(APITestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(third.status_code, 429)
         self.assertEqual(third.data["error"]["code"], "throttled")
-
-
-class InternalPartnerSourceApiTests(APITestCase):
-    def _access_token_for(self, user):
-        refresh = RefreshToken.for_user(user)
-        return str(refresh.access_token)
-
-    def _auth(self, user):
-        token = self._access_token_for(user)
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-    def test_admin_can_crud_partner_source(self):
-        admin = self._create_user("admin_partner_source", UserRole.ADMIN)
-        partner = Partner.objects.create(name="Northwind", code="northwind")
-        self._auth(admin)
-
-        create_resp = self.client.post(
-            "/api/v1/partners/sources/",
-            {
-                "partner": str(partner.id),
-                "code": "instagram",
-                "name": "Instagram",
-                "is_active": True,
-            },
-            format="json",
-        )
-        self.assertEqual(create_resp.status_code, 201)
-        source_id = create_resp.data["id"]
-        self.assertEqual(create_resp.data["partner_code"], partner.code)
-
-        list_resp = self.client.get("/api/v1/partners/sources/", {"partner": str(partner.id)})
-        self.assertEqual(list_resp.status_code, 200)
-        self.assertEqual(list_resp.data["count"], 1)
-        self.assertEqual(list_resp.data["results"][0]["id"], source_id)
-
-        patch_resp = self.client.patch(
-            f"/api/v1/partners/sources/{source_id}/",
-            {"name": "Instagram Ads"},
-            format="json",
-        )
-        self.assertEqual(patch_resp.status_code, 200)
-        self.assertEqual(patch_resp.data["name"], "Instagram Ads")
-
-        soft_delete_resp = self.client.post(f"/api/v1/partners/sources/{source_id}/soft_delete/", {}, format="json")
-        self.assertEqual(soft_delete_resp.status_code, 204)
-        self.assertFalse(PartnerSource.objects.filter(id=source_id).exists())
-        self.assertTrue(PartnerSource.all_objects.filter(id=source_id).exists())
-
-        restore_resp = self.client.post(f"/api/v1/partners/sources/{source_id}/restore/", {}, format="json")
-        self.assertEqual(restore_resp.status_code, 200)
-        self.assertTrue(PartnerSource.objects.filter(id=source_id).exists())
-
-    def test_manager_cannot_create_partner_source(self):
-        manager = self._create_user("manager_partner_source", UserRole.MANAGER)
-        partner = Partner.objects.create(name="Manager Partner", code="manager-partner")
-        self._auth(manager)
-
-        response = self.client.post(
-            "/api/v1/partners/sources/",
-            {"partner": str(partner.id), "code": "seo", "name": "SEO", "is_active": True},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.data["error"]["code"], "permission_denied")
-
-    def test_admin_cannot_hard_delete_partner_source(self):
-        admin = self._create_user("admin_partner_source_delete", UserRole.ADMIN)
-        partner = Partner.objects.create(name="Delete Partner", code="delete-partner")
-        source = PartnerSource.objects.create(partner=partner, code="google", name="Google")
-        self._auth(admin)
-
-        response = self.client.delete(f"/api/v1/partners/sources/{source.id}/")
-
-        self.assertEqual(response.status_code, 403)
-        self.assertTrue(PartnerSource.all_objects.filter(id=source.id).exists())
-
-    def test_superuser_can_hard_delete_partner_source(self):
-        superuser = self._create_user(
-            "su_partner_source_delete",
-            UserRole.SUPERUSER,
-            is_staff=True,
-            is_superuser=True,
-        )
-        partner = Partner.objects.create(name="Delete Partner SU", code="delete-partner-su")
-        source = PartnerSource.objects.create(partner=partner, code="facebook", name="Facebook")
-        self._auth(superuser)
-
-        response = self.client.delete(f"/api/v1/partners/sources/{source.id}/")
-
-        self.assertEqual(response.status_code, 204)
-        self.assertFalse(PartnerSource.all_objects.filter(id=source.id).exists())
-
-    def _create_user(self, username, role, **extra):
-        defaults = {"password": "pass12345", "role": role}
-        defaults.update(extra)
-        return User.objects.create_user(username=username, **defaults)
 
 
 class InternalPartnerApiTests(APITestCase):
@@ -587,7 +510,6 @@ class InternalPartnerTokenApiTests(APITestCase):
     def test_admin_can_create_and_list_partner_token(self):
         admin = self._create_user("admin_partner_token", UserRole.ADMIN)
         partner = Partner.objects.create(name="Token Partner", code="token-partner")
-        source = PartnerSource.objects.create(partner=partner, code="google", name="Google")
         self._auth(admin)
 
         create_resp = self.client.post(
@@ -595,13 +517,14 @@ class InternalPartnerTokenApiTests(APITestCase):
             {
                 "partner": str(partner.id),
                 "name": "frontend-dev",
-                "source": str(source.id),
+                "source": "google",
                 "is_active": True,
             },
             format="json",
         )
         self.assertEqual(create_resp.status_code, 201)
         token_id = create_resp.data["id"]
+        self.assertEqual(create_resp.data["source"], "google")
         self.assertTrue(create_resp.data["issued_token"])
         self.assertTrue(create_resp.data["prefix"])
 
@@ -609,27 +532,27 @@ class InternalPartnerTokenApiTests(APITestCase):
         self.assertEqual(list_resp.status_code, 200)
         self.assertEqual(list_resp.data["count"], 1)
         self.assertEqual(list_resp.data["results"][0]["id"], token_id)
+        self.assertEqual(list_resp.data["results"][0]["source"], "google")
         self.assertIsNone(list_resp.data["results"][0]["issued_token"])
 
-    def test_admin_cannot_create_token_with_foreign_source(self):
-        admin = self._create_user("admin_partner_token_foreign", UserRole.ADMIN)
-        partner_a = Partner.objects.create(name="Partner A", code="partner-a")
-        partner_b = Partner.objects.create(name="Partner B", code="partner-b")
-        foreign_source = PartnerSource.objects.create(partner=partner_b, code="fb", name="Facebook")
+    def test_admin_can_create_token_with_arbitrary_source_string(self):
+        admin = self._create_user("admin_partner_token_string_source", UserRole.ADMIN)
+        partner = Partner.objects.create(name="Partner String Source", code="partner-string-source")
         self._auth(admin)
 
         response = self.client.post(
             "/api/v1/partners/tokens/",
             {
-                "partner": str(partner_a.id),
-                "name": "bad-token",
-                "source": str(foreign_source.id),
+                "partner": str(partner.id),
+                "name": "string-source-token",
+                "source": "  tiktok_ads  ",
             },
             format="json",
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["source"], "tiktok_ads")
+        self.assertEqual(PartnerToken.objects.get(id=response.data["id"]).source, "tiktok_ads")
 
     def test_admin_cannot_set_raw_token_manually(self):
         admin = self._create_user("admin_partner_token_raw", UserRole.ADMIN)

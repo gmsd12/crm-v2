@@ -125,7 +125,6 @@ class PartnerLeadViewSet(
         "phone",
         "full_name",
         "email",
-        "priority",
         "source",
         "status__code",
     ]
