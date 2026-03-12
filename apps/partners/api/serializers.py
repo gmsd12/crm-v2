@@ -37,7 +37,6 @@ class PartnerAdminSerializer(serializers.ModelSerializer):
 class PartnerTokenAdminSerializer(serializers.ModelSerializer):
     partner_code = serializers.CharField(source="partner.code", read_only=True)
     issued_token = serializers.SerializerMethodField(read_only=True)
-    raw_token = serializers.CharField(write_only=True, required=False, min_length=20)
 
     class Meta:
         model = PartnerToken
@@ -53,7 +52,6 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
             "last_used_at",
             "prefix",
             "issued_token",
-            "raw_token",
             "created_at",
             "updated_at",
         ]
@@ -76,7 +74,7 @@ class PartnerTokenAdminSerializer(serializers.ModelSerializer):
         return getattr(obj, "_issued_token", None)
 
     def create(self, validated_data):
-        raw_token = validated_data.pop("raw_token", None) or PartnerToken.generate_raw_token()
+        raw_token = PartnerToken.generate_raw_token()
         token = PartnerToken.build(
             partner=validated_data["partner"],
             raw_token=raw_token,

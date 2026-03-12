@@ -631,6 +631,25 @@ class InternalPartnerTokenApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["error"]["code"], "validation_error")
 
+    def test_admin_cannot_set_raw_token_manually(self):
+        admin = self._create_user("admin_partner_token_raw", UserRole.ADMIN)
+        partner = Partner.objects.create(name="Token Partner Raw", code="token-partner-raw")
+        self._auth(admin)
+
+        response = self.client.post(
+            "/api/v1/partners/tokens/",
+            {
+                "partner": str(partner.id),
+                "name": "manual-raw",
+                "raw_token": "tok_live_manual_should_not_be_allowed_1234567890",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertIn("raw_token", response.data["error"]["details"])
+
     def test_hard_delete_partner_token_is_superuser_only(self):
         admin = self._create_user("admin_partner_token_delete", UserRole.ADMIN)
         superuser = self._create_user(
