@@ -183,6 +183,20 @@ class LeadSerializer(serializers.ModelSerializer):
         return comments_by_lead.get(str(obj.id))
 
 
+class LeadMetricsDrilldownSerializer(LeadSerializer):
+    class Meta(LeadSerializer.Meta):
+        fields = [
+            "id",
+            "full_name",
+            "email",
+            "partner",
+            "manager",
+            "status",
+            "received_at",
+            "tags",
+        ]
+
+
 class LeadWriteSerializer(serializers.ModelSerializer):
     first_manager = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.filter(is_active=True),
@@ -399,6 +413,20 @@ class LeadFunnelMetricsQuerySerializer(serializers.Serializer):
         return attrs
 
 
+class LeadMetricsDrilldownQuerySerializer(serializers.Serializer):
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
+    partner = serializers.PrimaryKeyRelatedField(queryset=Partner.objects.all(), required=False)
+    status_id = serializers.PrimaryKeyRelatedField(queryset=LeadStatus.objects.all(), source="status")
+
+    def validate(self, attrs):
+        date_from = attrs.get("date_from")
+        date_to = attrs.get("date_to")
+        if date_from and date_to and date_from > date_to:
+            raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
+        return attrs
+
+
 class LeadDepositStatsQuerySerializer(serializers.Serializer):
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
@@ -484,6 +512,8 @@ class BulkLeadClearTagsSerializer(_BulkLeadTagBaseSerializer):
 
 class LeadCommentSerializer(serializers.ModelSerializer):
     author_username = serializers.CharField(source="author.username", read_only=True)
+    author_first_name = serializers.CharField(source="author.first_name", read_only=True)
+    author_last_name = serializers.CharField(source="author.last_name", read_only=True)
 
     class Meta:
         model = LeadComment
@@ -492,12 +522,22 @@ class LeadCommentSerializer(serializers.ModelSerializer):
             "lead",
             "author",
             "author_username",
+            "author_first_name",
+            "author_last_name",
             "body",
             "is_pinned",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "author", "author_username", "created_at", "updated_at"]
+        read_only_fields = [
+            "id",
+            "author",
+            "author_username",
+            "author_first_name",
+            "author_last_name",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class LeadAttachmentSerializer(serializers.ModelSerializer):

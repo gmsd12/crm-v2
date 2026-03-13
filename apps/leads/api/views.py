@@ -78,6 +78,8 @@ from .serializers import (
     LeadChangeFirstManagerSerializer,
     LeadDepositStatsQuerySerializer,
     LeadFunnelMetricsQuerySerializer,
+    LeadMetricsDrilldownQuerySerializer,
+    LeadMetricsDrilldownSerializer,
     LeadSetTagsSerializer,
     LeadWriteSerializer,
     LeadCommentSerializer,
@@ -1087,6 +1089,20 @@ class LeadCommentViewSet(RBACActionMixin, viewsets.ModelViewSet):
         "created_at",
         "updated_at",
     ]
+
+    def _metrics_drilldown_requested(self) -> bool:
+        raw = (self.request.query_params.get("metrics_drilldown") or "").strip().lower()
+        return raw in {"1", "true", "yes", "y", "on"}
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(self.request.user, "role", None)
+        if self._metrics_drilldown_requested() and role == UserRole.TEAMLEADER:
+            return queryset.filter(
+                Q(lead__manager__role__in=[UserRole.MANAGER, UserRole.TEAMLEADER])
+                | Q(author__role__in=[UserRole.MANAGER, UserRole.TEAMLEADER])
+            )
+        return queryset
 
     def _assert_write_allowed(self, instance: LeadComment):
         role = getattr(self.request.user, "role", None)
@@ -2653,11 +2669,7 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
-        requester_role = getattr(request.user, "role", None)
-        if requester_role in {UserRole.MANAGER, UserRole.RET}:
-            raise PermissionDenied("У вас нет доступа к метрикам")
-        if "manager" in request.query_params:
-            raise serializers.ValidationError({"manager": "Фильтр manager не поддерживается в этом эндпоинте"})
+        requester_role = self._assert_lead_funnel_metrics_access_allowed(request)
         query = LeadFunnelMetricsQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
 
@@ -2666,19 +2678,19 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
         if date_from > date_to:
             raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
 
-        tz = timezone.get_current_timezone()
-        period_start = timezone.make_aware(datetime.combine(date_from, time.min), tz)
-        period_end = timezone.make_aware(datetime.combine(date_to + timedelta(days=1), time.min), tz)
-
         partner = query.validated_data.get("partner")
         group_by = query.validated_data.get("group_by")
-        manager_scope = request.user if requester_role in {UserRole.MANAGER, UserRole.RET} else None
-
-        leads_received_qs = Lead.objects.filter(received_at__gte=period_start, received_at__lt=period_end)
-        if partner:
-            leads_received_qs = leads_received_qs.filter(partner=partner)
-        if manager_scope:
-            leads_received_qs = leads_received_qs.filter(first_manager=manager_scope)
+        metrics_scope = self._resolve_metrics_scope(
+            requester_role=requester_role,
+            request_user=request.user,
+            date_from=date_from,
+            date_to=date_to,
+            partner=partner,
+        )
+        period_start = metrics_scope["period_start"]
+        period_end = metrics_scope["period_end"]
+        manager_scope = metrics_scope["manager_scope"]
+        leads_received_qs = metrics_scope["leads_received_qs"]
 
         valid_status_filter = Q(status__is_valid=True)
         won_status_filter = Q(status__conversion_bucket=LeadStatus.ConversionBucket.WON)
@@ -2867,6 +2879,70 @@ class LeadViewSet(RBACActionMixin, viewsets.ModelViewSet):
             payload.update(_build_metrics_bundle(partner_filter=None))
 
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _assert_lead_funnel_metrics_access_allowed(self, request):
+        requester_role = getattr(request.user, "role", None)
+        if requester_role in {UserRole.MANAGER, UserRole.RET}:
+            raise PermissionDenied("У вас нет доступа к метрикам")
+        if "manager" in request.query_params:
+            raise serializers.ValidationError({"manager": "Фильтр manager не поддерживается в этом эндпоинте"})
+        return requester_role
+
+    def _resolve_metrics_scope(self, *, requester_role, request_user, date_from, date_to, partner):
+        tz = timezone.get_current_timezone()
+        period_start = timezone.make_aware(datetime.combine(date_from, time.min), tz)
+        period_end = timezone.make_aware(datetime.combine(date_to + timedelta(days=1), time.min), tz)
+        manager_scope = request_user if requester_role in {UserRole.MANAGER, UserRole.RET} else None
+
+        leads_received_qs = Lead.objects.filter(received_at__gte=period_start, received_at__lt=period_end)
+        if partner:
+            leads_received_qs = leads_received_qs.filter(partner=partner)
+        if manager_scope:
+            leads_received_qs = leads_received_qs.filter(first_manager=manager_scope)
+
+        return {
+            "period_start": period_start,
+            "period_end": period_end,
+            "manager_scope": manager_scope,
+            "leads_received_qs": leads_received_qs,
+        }
+
+    @action(detail=False, methods=["get"], url_path="metrics-drilldown")
+    def metrics_drilldown(self, request):
+        requester_role = self._assert_lead_funnel_metrics_access_allowed(request)
+        query = LeadMetricsDrilldownQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+
+        date_to = query.validated_data.get("date_to") or timezone.localdate()
+        date_from = query.validated_data.get("date_from") or (date_to - timedelta(days=30))
+        if date_from > date_to:
+            raise serializers.ValidationError({"date_from": "date_from должен быть меньше или равен date_to"})
+
+        partner = query.validated_data.get("partner")
+        status_obj = query.validated_data["status"]
+        metrics_scope = self._resolve_metrics_scope(
+            requester_role=requester_role,
+            request_user=request.user,
+            date_from=date_from,
+            date_to=date_to,
+            partner=partner,
+        )
+
+        queryset = (
+            metrics_scope["leads_received_qs"]
+            .filter(status=status_obj)
+            .select_related("partner", "manager", "status")
+            .prefetch_related("tags")
+            .order_by("-received_at", "-id")
+        )
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = LeadMetricsDrilldownSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = LeadMetricsDrilldownSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="change-first-manager")
     def change_first_manager(self, request, pk=None):

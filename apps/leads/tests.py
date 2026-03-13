@@ -2400,6 +2400,81 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(status_buckets["WON"], LeadStatus.WorkBucket.NON_WORKING)
         self.assertEqual(status_buckets["CALL_LATER_METRICS"], LeadStatus.WorkBucket.RETURN)
 
+    def test_metrics_drilldown_returns_status_filtered_leads_with_tags_and_manager(self):
+        admin = User.objects.create_user(username="admin_metrics_drilldown", password="pass12345", role=UserRole.ADMIN)
+        manager = User.objects.create_user(
+            username="manager_metrics_drilldown",
+            password="pass12345",
+            role=UserRole.MANAGER,
+            first_name="Ivan",
+            last_name="Petrov",
+        )
+        partner = Partner.objects.create(name="Partner Metrics Drilldown", code="partner-metrics-drilldown")
+        status_new = LeadStatus.objects.create(code="NEW_METRICS_DRILLDOWN", name="New", is_default_for_new_leads=True)
+        status_won = LeadStatus.objects.create(
+            code="WON_METRICS_DRILLDOWN",
+            name="Won",
+            is_valid=True,
+            conversion_bucket=LeadStatus.ConversionBucket.WON,
+        )
+        hot_tag = LeadTag.objects.create(name="Hot", color="red", icon="fire")
+        keep_lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            first_manager=manager,
+            status=status_won,
+            full_name="John Doe",
+            email="john@example.com",
+            phone="+188800101",
+            custom_fields={},
+            received_at=timezone.make_aware(datetime(2026, 1, 10, 10, 0, 0)),
+        )
+        keep_lead.tags.add(hot_tag)
+        Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            first_manager=manager,
+            status=status_new,
+            full_name="Jane Roe",
+            email="jane@example.com",
+            phone="+188800102",
+            custom_fields={},
+            received_at=timezone.make_aware(datetime(2026, 1, 12, 10, 0, 0)),
+        )
+
+        self._auth(admin)
+        response = self.client.get(
+            "/api/v1/leads/records/metrics-drilldown/",
+            {
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-31",
+                "status_id": str(status_won.id),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        item = response.data["results"][0]
+        self.assertEqual(item["id"], keep_lead.id)
+        self.assertEqual(item["full_name"], "John Doe")
+        self.assertEqual(item["email"], "john@example.com")
+        self.assertEqual(item["partner"]["id"], str(partner.id))
+        self.assertEqual(item["manager"]["id"], str(manager.id))
+        self.assertEqual(item["manager"]["first_name"], "Ivan")
+        self.assertEqual(item["manager"]["last_name"], "Petrov")
+        self.assertEqual(item["status"]["id"], str(status_won.id))
+        self.assertEqual(item["tags"][0]["id"], str(hot_tag.id))
+
+    def test_metrics_drilldown_requires_status_id(self):
+        admin = User.objects.create_user(username="admin_metrics_drilldown_required", password="pass12345", role=UserRole.ADMIN)
+        self._auth(admin)
+
+        response = self.client.get("/api/v1/leads/records/metrics-drilldown/?date_from=2026-01-01&date_to=2026-01-31")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertIn("status_id", response.data["error"]["details"])
+
     def test_admin_can_get_leads_metrics_for_single_partner(self):
         admin = User.objects.create_user(username="admin_metrics_partner", password="pass12345", role=UserRole.ADMIN)
         manager = User.objects.create_user(username="manager_metrics_partner", password="pass12345", role=UserRole.MANAGER)
@@ -2662,6 +2737,173 @@ class LeadStatusCatalogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"]["code"], "validation_error")
+
+    def test_teamleader_metrics_drilldown_comments_hide_ret_and_admin_authors(self):
+        teamleader = User.objects.create_user(
+            username="tl_metrics_comments_scope",
+            password="pass12345",
+            role=UserRole.TEAMLEADER,
+        )
+        other_teamleader = User.objects.create_user(
+            username="tl_metrics_comments_other",
+            password="pass12345",
+            role=UserRole.TEAMLEADER,
+        )
+        manager = User.objects.create_user(
+            username="manager_metrics_comments_scope",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        ret_user = User.objects.create_user(
+            username="ret_metrics_comments_scope",
+            password="pass12345",
+            role=UserRole.RET,
+        )
+        admin = User.objects.create_user(
+            username="admin_metrics_comments_scope",
+            password="pass12345",
+            role=UserRole.ADMIN,
+        )
+        partner = Partner.objects.create(name="Partner Metrics Comments Scope", code="partner-metrics-comments-scope")
+        status_new = LeadStatus.objects.create(
+            code="NEW_METRICS_COMMENTS_SCOPE",
+            name="New Metrics Comments Scope",
+            is_default_for_new_leads=True,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=ret_user,
+            first_manager=manager,
+            status=status_new,
+            phone="+188800001",
+            custom_fields={},
+        )
+        comment_manager = LeadComment.objects.create(lead=lead, author=manager, body="Manager note")
+        comment_teamleader = LeadComment.objects.create(lead=lead, author=other_teamleader, body="Teamleader note")
+        LeadComment.objects.create(lead=lead, author=ret_user, body="RET note")
+        LeadComment.objects.create(lead=lead, author=admin, body="Admin note")
+
+        self._auth(teamleader)
+        metrics_comments_response = self.client.get(
+            "/api/v1/leads/comments/",
+            {
+                "lead": str(lead.id),
+                "ordering": "created_at",
+                "metrics_drilldown": "true",
+            },
+        )
+
+        self.assertEqual(metrics_comments_response.status_code, status.HTTP_200_OK)
+        metric_items = metrics_comments_response.data["results"]
+        self.assertEqual(
+            [item["id"] for item in metric_items],
+            [comment_manager.id, comment_teamleader.id],
+        )
+
+        regular_comments_response = self.client.get(
+            "/api/v1/leads/comments/",
+            {
+                "lead": str(lead.id),
+                "ordering": "created_at",
+            },
+        )
+
+        self.assertEqual(regular_comments_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(regular_comments_response.data["count"], 4)
+
+    def test_teamleader_metrics_drilldown_comments_show_all_when_lead_is_on_manager(self):
+        teamleader = User.objects.create_user(
+            username="tl_metrics_comments_all_on_manager",
+            password="pass12345",
+            role=UserRole.TEAMLEADER,
+        )
+        other_teamleader = User.objects.create_user(
+            username="tl_metrics_comments_all_other",
+            password="pass12345",
+            role=UserRole.TEAMLEADER,
+        )
+        manager = User.objects.create_user(
+            username="manager_metrics_comments_all_scope",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        ret_user = User.objects.create_user(
+            username="ret_metrics_comments_all_scope",
+            password="pass12345",
+            role=UserRole.RET,
+        )
+        admin = User.objects.create_user(
+            username="admin_metrics_comments_all_scope",
+            password="pass12345",
+            role=UserRole.ADMIN,
+        )
+        partner = Partner.objects.create(name="Partner Metrics Comments All", code="partner-metrics-comments-all")
+        status_new = LeadStatus.objects.create(
+            code="NEW_METRICS_COMMENTS_ALL",
+            name="New Metrics Comments All",
+            is_default_for_new_leads=True,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=manager,
+            first_manager=manager,
+            status=status_new,
+            phone="+188800003",
+            custom_fields={},
+        )
+        comment_manager = LeadComment.objects.create(lead=lead, author=manager, body="Manager note")
+        comment_teamleader = LeadComment.objects.create(lead=lead, author=other_teamleader, body="Teamleader note")
+        comment_ret = LeadComment.objects.create(lead=lead, author=ret_user, body="RET note")
+        comment_admin = LeadComment.objects.create(lead=lead, author=admin, body="Admin note")
+
+        self._auth(teamleader)
+        response = self.client.get(
+            "/api/v1/leads/comments/",
+            {
+                "lead": str(lead.id),
+                "ordering": "created_at",
+                "metrics_drilldown": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data["results"]],
+            [comment_manager.id, comment_teamleader.id, comment_ret.id, comment_admin.id],
+        )
+
+    def test_comment_serializer_exposes_author_first_and_last_name(self):
+        admin = User.objects.create_user(username="admin_comment_author_names", password="pass12345", role=UserRole.ADMIN)
+        author = User.objects.create_user(
+            username="comment_author_names",
+            password="pass12345",
+            role=UserRole.MANAGER,
+            first_name="Ivan",
+            last_name="Petrov",
+        )
+        partner = Partner.objects.create(name="Partner Comment Author Names", code="partner-comment-author-names")
+        status_new = LeadStatus.objects.create(
+            code="NEW_COMMENT_AUTHOR_NAMES",
+            name="New Comment Author Names",
+            is_default_for_new_leads=True,
+        )
+        lead = Lead.objects.create(
+            partner=partner,
+            manager=author,
+            first_manager=author,
+            status=status_new,
+            phone="+188800002",
+            custom_fields={},
+        )
+        comment = LeadComment.objects.create(lead=lead, author=author, body="Named comment")
+
+        self._auth(admin)
+        response = self.client.get("/api/v1/leads/comments/", {"lead": str(lead.id)})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], comment.id)
+        self.assertEqual(response.data["results"][0]["author_first_name"], "Ivan")
+        self.assertEqual(response.data["results"][0]["author_last_name"], "Petrov")
 
     def test_metrics_support_owner_and_executor_attribution(self):
         admin = User.objects.create_user(username="admin_metrics_attr", password="pass12345", role=UserRole.ADMIN)
