@@ -79,6 +79,15 @@ class Command(BaseCommand):
             help="Batch size for bulk inserts during import.",
         )
         parser.add_argument(
+            "--sample-leads",
+            type=int,
+            default=0,
+            help=(
+                "Import only the first N legacy leads ordered by id and restrict comments/"
+                "deposits/attachments to those leads."
+            ),
+        )
+        parser.add_argument(
             "--use-orphan-deposit-lead",
             action="store_true",
             default=True,
@@ -115,6 +124,7 @@ class Command(BaseCommand):
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.progress_every = max(1, int(options["progress_every"]))
         self.batch_size = max(100, int(options["batch_size"]))
+        self.sample_leads = max(0, int(options.get("sample_leads") or 0))
         self.use_orphan_deposit_lead = bool(options["use_orphan_deposit_lead"])
         self.orphan_partner_code = str(options["orphan_partner_code"]).strip() or "legacy-orphans"
         self.orphan_lead_name = str(options["orphan_lead_name"]).strip() or "Legacy orphan deposits"
@@ -180,29 +190,67 @@ class Command(BaseCommand):
         self.print_warning_summary()
         self.stdout.write(self.style.SUCCESS("Legacy import completed."))
 
-    def fetch_rows(self, table_name: str, columns: list[str]) -> list[dict[str, object]]:
+    def fetch_rows(
+        self,
+        table_name: str,
+        columns: list[str],
+        *,
+        where_sql: str = "",
+        params: list[object] | tuple[object, ...] | None = None,
+        order_by: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
         quoted_table = self.legacy_connection.ops.quote_name(table_name)
         quoted_columns = ", ".join(self.legacy_connection.ops.quote_name(column) for column in columns)
         sql = f"SELECT {quoted_columns} FROM {quoted_table}"
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        if order_by:
+            sql += " ORDER BY " + ", ".join(self.legacy_connection.ops.quote_name(column) for column in order_by)
+        if limit:
+            sql += f" LIMIT {int(limit)}"
         with self.legacy_connection.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, params or [])
             rows = cursor.fetchall()
             column_names = [description[0] for description in cursor.description]
         return [dict(zip(column_names, row, strict=False)) for row in rows]
 
-    def count_rows(self, table_name: str) -> int:
+    def count_rows(
+        self,
+        table_name: str,
+        *,
+        where_sql: str = "",
+        params: list[object] | tuple[object, ...] | None = None,
+    ) -> int:
         quoted_table = self.legacy_connection.ops.quote_name(table_name)
         sql = f"SELECT COUNT(*) FROM {quoted_table}"
+        if where_sql:
+            sql += f" WHERE {where_sql}"
         with self.legacy_connection.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, params or [])
             return int(cursor.fetchone()[0])
 
-    def iter_rows(self, table_name: str, columns: list[str]):
+    def iter_rows(
+        self,
+        table_name: str,
+        columns: list[str],
+        *,
+        where_sql: str = "",
+        params: list[object] | tuple[object, ...] | None = None,
+        order_by: list[str] | None = None,
+        limit: int | None = None,
+    ):
         quoted_table = self.legacy_connection.ops.quote_name(table_name)
         quoted_columns = ", ".join(self.legacy_connection.ops.quote_name(column) for column in columns)
         sql = f"SELECT {quoted_columns} FROM {quoted_table}"
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        if order_by:
+            sql += " ORDER BY " + ", ".join(self.legacy_connection.ops.quote_name(column) for column in order_by)
+        if limit:
+            sql += f" LIMIT {int(limit)}"
         with self.legacy_connection.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, params or [])
             column_names = [description[0] for description in cursor.description]
             while True:
                 rows = cursor.fetchmany(self.batch_size)
@@ -210,6 +258,18 @@ class Command(BaseCommand):
                     break
                 for row in rows:
                     yield dict(zip(column_names, row, strict=False))
+
+    def build_in_filter(self, field_name: str, values: list[int], *, include_null: bool = False) -> tuple[str, list[object]]:
+        if not values:
+            if include_null:
+                return f"{self.legacy_connection.ops.quote_name(field_name)} IS NULL", []
+            return "1=0", []
+        quoted_field = self.legacy_connection.ops.quote_name(field_name)
+        placeholders = ", ".join(["%s"] * len(values))
+        clause = f"{quoted_field} IN ({placeholders})"
+        if include_null:
+            clause = f"({clause} OR {quoted_field} IS NULL)"
+        return clause, list(values)
 
     def normalized_slug(self, value: str, *, fallback_prefix: str) -> str:
         base = slugify((value or "").strip())[:40]
@@ -551,6 +611,8 @@ class Command(BaseCommand):
                 "created_at",
                 "updated_at",
             ],
+            order_by=["id"],
+            limit=self.sample_leads or None,
         )
         created = 0
         updated = 0
@@ -577,7 +639,7 @@ class Command(BaseCommand):
                 phone_master_sort_key[phone] = sort_key
                 phone_master_legacy_id[phone] = legacy_id
 
-        pending_creates: list[tuple[Lead, int]] = []
+        pending_creates: list[tuple[Lead, int, object, object]] = []
 
         def flush_pending_creates():
             nonlocal created
@@ -586,8 +648,9 @@ class Command(BaseCommand):
 
             objects = [item[0] for item in pending_creates]
             legacy_ids = [item[1] for item in pending_creates]
+            timestamps = [(item[2], item[3]) for item in pending_creates]
             if self.dry_run:
-                for lead, legacy_id in pending_creates:
+                for lead, legacy_id, _created_at, _updated_at in pending_creates:
                     self.lead_map[legacy_id] = self.mapped_pk(None, legacy_id)
                     if lead.phone and not lead.is_deleted:
                         existing_alive_phone_map[lead.phone] = self.lead_map[legacy_id]
@@ -597,6 +660,9 @@ class Command(BaseCommand):
 
             created_objects = Lead.all_objects.bulk_create(objects, batch_size=self.batch_size)
             if created_objects:
+                for lead, (created_at, updated_at) in zip(created_objects, timestamps, strict=False):
+                    lead.created_at = created_at
+                    lead.updated_at = updated_at
                 Lead.all_objects.bulk_update(created_objects, ["created_at", "updated_at"], batch_size=self.batch_size)
             for lead, legacy_id in zip(created_objects, legacy_ids, strict=False):
                 self.lead_map[legacy_id] = lead.pk
@@ -709,11 +775,12 @@ class Command(BaseCommand):
             if existing_lead_id:
                 if not self.dry_run:
                     lead.save()
+                    self.sync_timestamps(Lead, lead.pk, legacy_created_at, row.get("updated_at") or legacy_created_at)
                 self.lead_map[legacy_id] = self.mapped_pk(lead.pk, legacy_id)
                 if lead.phone and not lead.is_deleted:
                     existing_alive_phone_map[lead.phone] = self.lead_map[legacy_id]
             else:
-                pending_creates.append((lead, legacy_id))
+                pending_creates.append((lead, legacy_id, lead.created_at, lead.updated_at))
                 if len(pending_creates) >= self.batch_size:
                     flush_pending_creates()
 
@@ -735,24 +802,41 @@ class Command(BaseCommand):
     def import_comments(self):
         stage_started_at = time.monotonic()
         created = 0
-        total = self.count_rows(self.tables.comment)
+        where_sql = ""
+        params: list[object] = []
+        if self.sample_leads:
+            lead_ids = sorted(self.lead_map.keys())
+            if not lead_ids:
+                self.stdout.write(self.style.WARNING("Comments: skipped because no leads were selected by --sample-leads"))
+                self.log_stage_finished("Comments", stage_started_at)
+                return
+            where_sql, params = self.build_in_filter("lead_id", lead_ids)
+        total = self.count_rows(self.tables.comment, where_sql=where_sql, params=params)
         rows = self.iter_rows(
             self.tables.comment,
             ["id", "user_id", "lead_id", "comment", "created_at", "is_pinned"],
+            where_sql=where_sql,
+            params=params,
+            order_by=["id"],
         )
-        pending_comments: list[LeadComment] = []
+        pending_comments: list[tuple[LeadComment, object, object]] = []
         latest_contact_by_lead: dict[int, object] = {}
 
         def flush_pending_comments():
             nonlocal created
             if not pending_comments:
                 return
+            objects = [item[0] for item in pending_comments]
+            timestamps = [(item[1], item[2]) for item in pending_comments]
             if self.dry_run:
-                created += len(pending_comments)
+                created += len(objects)
                 pending_comments.clear()
                 return
-            created_comments = LeadComment.all_objects.bulk_create(pending_comments, batch_size=self.batch_size)
+            created_comments = LeadComment.all_objects.bulk_create(objects, batch_size=self.batch_size)
             if created_comments:
+                for comment, (created_at, updated_at) in zip(created_comments, timestamps, strict=False):
+                    comment.created_at = created_at
+                    comment.updated_at = updated_at
                 LeadComment.all_objects.bulk_update(
                     created_comments,
                     ["created_at", "updated_at"],
@@ -796,7 +880,7 @@ class Command(BaseCommand):
                 created_at=created_at,
                 updated_at=created_at,
             )
-            pending_comments.append(comment)
+            pending_comments.append((comment, created_at, created_at))
             current_latest = latest_contact_by_lead.get(lead_id)
             if current_latest is None or created_at > current_latest:
                 latest_contact_by_lead[lead_id] = created_at
@@ -824,12 +908,24 @@ class Command(BaseCommand):
         stage_started_at = time.monotonic()
         created = 0
         skipped = 0
-        total = self.count_rows(self.tables.deposit)
+        where_sql = ""
+        params: list[object] = []
+        if self.sample_leads:
+            lead_ids = sorted(self.lead_map.keys())
+            if not lead_ids and not self.use_orphan_deposit_lead:
+                self.stdout.write(self.style.WARNING("Deposits: skipped because no leads were selected by --sample-leads"))
+                self.log_stage_finished("Deposits", stage_started_at)
+                return
+            where_sql, params = self.build_in_filter("lead_id", lead_ids, include_null=self.use_orphan_deposit_lead)
+        total = self.count_rows(self.tables.deposit, where_sql=where_sql, params=params)
         rows = self.iter_rows(
             self.tables.deposit,
             ["id", "creator_id", "lead_id", "amount", "created_at", "type"],
+            where_sql=where_sql,
+            params=params,
+            order_by=["id"],
         )
-        pending_deposits: list[LeadDeposit] = []
+        pending_deposits: list[tuple[LeadDeposit, object, object]] = []
         latest_contact_by_lead: dict[int, object] = {}
         existing_ftd_leads = set(
             LeadDeposit.all_objects.filter(type=LeadDeposit.Type.FTD, is_deleted=False).values_list("lead_id", flat=True)
@@ -844,12 +940,17 @@ class Command(BaseCommand):
             nonlocal created
             if not pending_deposits:
                 return
+            objects = [item[0] for item in pending_deposits]
+            timestamps = [(item[1], item[2]) for item in pending_deposits]
             if self.dry_run:
-                created += len(pending_deposits)
+                created += len(objects)
                 pending_deposits.clear()
                 return
-            created_deposits = LeadDeposit.all_objects.bulk_create(pending_deposits, batch_size=self.batch_size)
+            created_deposits = LeadDeposit.all_objects.bulk_create(objects, batch_size=self.batch_size)
             if created_deposits:
+                for deposit, (created_at, updated_at) in zip(created_deposits, timestamps, strict=False):
+                    deposit.created_at = created_at
+                    deposit.updated_at = updated_at
                 LeadDeposit.all_objects.bulk_update(
                     created_deposits,
                     ["created_at", "updated_at"],
@@ -933,7 +1034,7 @@ class Command(BaseCommand):
                 created_at=created_at,
                 updated_at=created_at,
             )
-            pending_deposits.append(deposit)
+            pending_deposits.append((deposit, created_at, created_at))
             if deposit_type == LeadDeposit.Type.FTD:
                 pending_ftd_leads.add(lead_id)
             elif deposit_type == LeadDeposit.Type.RELOAD:
@@ -963,23 +1064,40 @@ class Command(BaseCommand):
     def import_attachments(self):
         stage_started_at = time.monotonic()
         created = 0
-        total = self.count_rows(self.tables.record)
+        where_sql = ""
+        params: list[object] = []
+        if self.sample_leads:
+            lead_ids = sorted(self.lead_map.keys())
+            if not lead_ids:
+                self.stdout.write(self.style.WARNING("Attachments: skipped because no leads were selected by --sample-leads"))
+                self.log_stage_finished("Attachments", stage_started_at)
+                return
+            where_sql, params = self.build_in_filter("lead_id", lead_ids)
+        total = self.count_rows(self.tables.record, where_sql=where_sql, params=params)
         rows = self.iter_rows(
             self.tables.record,
             ["id", "author_id", "comment_id", "lead_id", "record", "created_at"],
+            where_sql=where_sql,
+            params=params,
+            order_by=["id"],
         )
-        pending_attachments: list[LeadAttachment] = []
+        pending_attachments: list[tuple[LeadAttachment, object, object]] = []
 
         def flush_pending_attachments():
             nonlocal created
             if not pending_attachments:
                 return
+            objects = [item[0] for item in pending_attachments]
+            timestamps = [(item[1], item[2]) for item in pending_attachments]
             if self.dry_run:
-                created += len(pending_attachments)
+                created += len(objects)
                 pending_attachments.clear()
                 return
-            created_attachments = LeadAttachment.all_objects.bulk_create(pending_attachments, batch_size=self.batch_size)
+            created_attachments = LeadAttachment.all_objects.bulk_create(objects, batch_size=self.batch_size)
             if created_attachments:
+                for attachment, (created_at, updated_at) in zip(created_attachments, timestamps, strict=False):
+                    attachment.created_at = created_at
+                    attachment.updated_at = updated_at
                 LeadAttachment.all_objects.bulk_update(
                     created_attachments,
                     ["created_at", "updated_at"],
@@ -1030,7 +1148,7 @@ class Command(BaseCommand):
                 created_at=created_at,
                 updated_at=created_at,
             )
-            pending_attachments.append(attachment)
+            pending_attachments.append((attachment, created_at, created_at))
             if len(pending_attachments) >= self.batch_size:
                 flush_pending_attachments()
 
