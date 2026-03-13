@@ -24,6 +24,8 @@ staticfiles/
 
 # Local notes
 docs/tasks.txt
+legacy/reports/
+legacy/*.dump
 
 # Coverage
 coverage/

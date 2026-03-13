@@ -137,6 +137,9 @@ DATABASES = {
         default=f"sqlite:///{(CONFIG_DIR / 'db.sqlite3').as_posix()}",
     )
 }
+LEGACY_DATABASE_URL = env("LEGACY_DATABASE_URL", default="").strip()
+if LEGACY_DATABASE_URL:
+    DATABASES["legacy"] = env.db("LEGACY_DATABASE_URL")
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

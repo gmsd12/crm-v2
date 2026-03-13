@@ -16,5 +16,6 @@ django-import-export==4.1.1
 django-admin-rangefilter==0.13.2
 openpyxl==3.1.5
 python-magic==0.4.27
+phonenumbers==8.13.55
 
 psycopg[binary]==3.2.1

@@ -198,6 +198,22 @@ class PartnerLeadApiTests(APITestCase):
         self.assertEqual(lead.geo, "RU")
         self.assertEqual(lead.age, 27)
 
+    def test_partner_geo_is_overridden_by_phone_inference(self):
+        response = self.client.post(
+            "/api/v1/partner/leads/",
+            {
+                "phone": "+14155552671",
+                "geo": "RU",
+            },
+            format="json",
+            HTTP_X_PARTNER_TOKEN=self.raw_token,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["geo"], "US")
+        lead = Lead.objects.get(partner=self.partner, phone="+14155552671")
+        self.assertEqual(lead.geo, "US")
+
     def test_partner_can_create_lead_with_null_custom_fields(self):
         response = self.client.post(
             "/api/v1/partner/leads/",

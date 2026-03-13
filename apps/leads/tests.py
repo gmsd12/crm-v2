@@ -3417,6 +3417,31 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["geo"], "RU")
 
+    def test_superuser_create_lead_geo_is_overridden_by_phone_inference(self):
+        superuser = User.objects.create_user(
+            username="su_lead_create_geo_inferred",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        partner = Partner.objects.create(name="Partner Lead Create Geo Inferred", code="partner-lead-create-geo-inferred")
+        self._auth(superuser)
+
+        response = self.client.post(
+            "/api/v1/leads/records/",
+            {
+                "partner": str(partner.id),
+                "full_name": "Geo Inferred",
+                "phone": "+14155552671",
+                "geo": "RU",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["geo"], "US")
+
     def test_teamleader_cannot_create_lead(self):
         teamleader = User.objects.create_user(username="tl_lead_create", password="pass12345", role=UserRole.TEAMLEADER)
         partner = Partner.objects.create(name="Partner Lead Create Deny", code="partner-lead-create-deny")

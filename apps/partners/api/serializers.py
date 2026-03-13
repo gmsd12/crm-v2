@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from django.utils import timezone
 from rest_framework import serializers
 from apps.notifications.publishers import publish_partner_duplicate_attempt
@@ -15,9 +13,8 @@ from apps.leads.models import (
     LeadDuplicateAttempt,
     LeadStatus,
 )
+from apps.leads.geo import GEO_CODE_RE, resolve_geo
 from django.db import transaction, IntegrityError
-
-GEO_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 
 class PartnerAdminSerializer(serializers.ModelSerializer):
@@ -154,7 +151,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         geo = (attrs.get("geo") or "").strip().upper()
         if geo and not GEO_CODE_RE.fullmatch(geo):
             raise serializers.ValidationError({"geo": "geo должен быть кодом страны из 2 заглавных букв"})
-        attrs["geo"] = geo
+        attrs["geo"] = resolve_geo(phone=phone, provided_geo=geo)
         attrs["full_name"] = (attrs.get("full_name") or "").strip()
         return attrs
 

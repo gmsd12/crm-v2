@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from decimal import Decimal
 
 from django.conf import settings
@@ -19,10 +18,10 @@ from apps.leads.models import (
     LeadTag,
     LeadStatus,
 )
+from apps.leads.geo import GEO_CODE_RE
 from apps.partners.models import Partner
 
 User = get_user_model()
-GEO_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 
 class LeadStatusSerializer(serializers.ModelSerializer):
