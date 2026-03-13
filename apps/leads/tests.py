@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -4106,6 +4107,49 @@ class LeadStatusCatalogApiTests(APITestCase):
             ).exists()
         )
 
+    def test_superuser_can_hard_delete_lead_with_deposits_and_attachments(self):
+        superuser = User.objects.create_user(
+            username="su_lead_hard_delete_relations",
+            password="pass12345",
+            role=UserRole.SUPERUSER,
+            is_staff=True,
+            is_superuser=True,
+        )
+        manager = User.objects.create_user(
+            username="manager_lead_hard_delete_relations",
+            password="pass12345",
+            role=UserRole.MANAGER,
+        )
+        partner = Partner.objects.create(name="Partner Lead Hard Delete Relations", code="partner-lead-hard-delete-rel")
+        lead = Lead.objects.create(partner=partner, manager=manager, phone="+1112", custom_fields={})
+        LeadDeposit.objects.create(lead=lead, creator=manager, amount="55.00", type=LeadDeposit.Type.FTD)
+
+        with TemporaryDirectory() as media_root:
+            with self.settings(MEDIA_ROOT=media_root, MEDIA_URL="/media/"):
+                attachment = LeadAttachment.objects.create(
+                    lead=lead,
+                    uploaded_by=manager,
+                    kind=LeadAttachment.Kind.IMAGE,
+                    file=SimpleUploadedFile("lead-delete.jpg", b"image-bytes", content_type="image/jpeg"),
+                )
+                stored_file_path = attachment.file.path
+                self._auth(superuser)
+
+                response = self.client.delete(f"/api/v1/leads/records/{lead.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Lead.all_objects.filter(id=lead.id).exists())
+        self.assertFalse(LeadDeposit.all_objects.filter(lead_id=lead.id).exists())
+        self.assertFalse(LeadAttachment.all_objects.filter(lead_id=lead.id).exists())
+        self.assertFalse(Path(stored_file_path).exists())
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                entity_type="lead",
+                entity_id=str(lead.id),
+                event_type=LeadAuditEvent.LEAD_HARD_DELETED,
+            ).exists()
+        )
+
     def test_admin_create_rejects_duplicate_phone(self):
         admin = User.objects.create_user(username="admin_dup_phone", password="pass12345", role=UserRole.ADMIN)
         partner = Partner.objects.create(name="Partner Dup Phone", code="partner-dup-phone")
@@ -4447,6 +4491,18 @@ class LeadStatusCatalogApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["lead"], lead.id)
         self.assertEqual(response.data["lead_full_name"], "Alice Walker")
+
+    def test_deposit_serializer_returns_null_lead_fields_for_leadless_deposit(self):
+        admin = User.objects.create_user(username="admin_dep_no_lead_name", password="pass12345", role=UserRole.ADMIN)
+        creator = User.objects.create_user(username="creator_dep_no_lead_name", password="pass12345", role=UserRole.MANAGER)
+        dep = LeadDeposit.objects.create(lead=None, creator=creator, amount="120.00", type=LeadDeposit.Type.DEPOSIT)
+        self._auth(admin)
+
+        response = self.client.get(f"/api/v1/leads/deposits/{dep.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["lead"])
+        self.assertIsNone(response.data["lead_full_name"])
 
     def test_deposits_default_ordering_is_newest_first(self):
         admin = User.objects.create_user(username="admin_dep_ordering", password="pass12345", role=UserRole.ADMIN)
@@ -4837,6 +4893,50 @@ class LeadStatusCatalogApiTests(APITestCase):
                 event_type=LeadAuditEvent.DEPOSIT_RESTORED,
             ).exists()
         )
+
+    def test_deposits_endpoint_admin_can_create_regular_deposit_without_lead(self):
+        admin = User.objects.create_user(username="admin_dep_no_lead", password="pass12345", role=UserRole.ADMIN)
+        self._auth(admin)
+
+        create_resp = self.client.post(
+            "/api/v1/leads/deposits/",
+            {
+                "amount": "77.00",
+                "reason": "manual no lead",
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(create_resp.data["lead"])
+        self.assertEqual(create_resp.data["type"], LeadDeposit.Type.DEPOSIT)
+        dep = LeadDeposit.objects.get(id=create_resp.data["id"])
+        self.assertIsNone(dep.lead_id)
+        self.assertTrue(
+            LeadAuditLog.objects.filter(
+                lead__isnull=True,
+                entity_type=LeadAuditEntity.LEAD_DEPOSIT,
+                entity_id=str(dep.id),
+                event_type=LeadAuditEvent.DEPOSIT_CREATED,
+            ).exists()
+        )
+
+    def test_deposits_endpoint_rejects_ftd_without_lead(self):
+        admin = User.objects.create_user(username="admin_dep_no_lead_ftd", password="pass12345", role=UserRole.ADMIN)
+        self._auth(admin)
+
+        response = self.client.post(
+            "/api/v1/leads/deposits/",
+            {
+                "amount": "77.00",
+                "type": LeadDeposit.Type.FTD,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"]["code"], "validation_error")
+        self.assertIn("type", response.data["error"]["details"])
 
     def test_deposits_endpoint_superuser_can_hard_delete_and_audit(self):
         superuser = User.objects.create_user(

@@ -87,28 +87,6 @@ class Command(BaseCommand):
                 "deposits/attachments to those leads."
             ),
         )
-        parser.add_argument(
-            "--use-orphan-deposit-lead",
-            action="store_true",
-            default=True,
-            help="Attach legacy deposits without lead_id to a technical fallback lead.",
-        )
-        parser.add_argument(
-            "--no-orphan-deposit-lead",
-            action="store_false",
-            dest="use_orphan_deposit_lead",
-            help="Skip legacy deposits without lead_id instead of attaching them to a technical fallback lead.",
-        )
-        parser.add_argument(
-            "--orphan-partner-code",
-            default="legacy-orphans",
-            help="Partner code for the technical fallback partner used by orphan deposits.",
-        )
-        parser.add_argument(
-            "--orphan-lead-name",
-            default="Legacy orphan deposits",
-            help="Full name for the technical fallback lead used by orphan deposits.",
-        )
 
     def handle(self, *args, **options):
         legacy_alias = options["legacy_alias"]
@@ -125,9 +103,6 @@ class Command(BaseCommand):
         self.progress_every = max(1, int(options["progress_every"]))
         self.batch_size = max(100, int(options["batch_size"]))
         self.sample_leads = max(0, int(options.get("sample_leads") or 0))
-        self.use_orphan_deposit_lead = bool(options["use_orphan_deposit_lead"])
-        self.orphan_partner_code = str(options["orphan_partner_code"]).strip() or "legacy-orphans"
-        self.orphan_lead_name = str(options["orphan_lead_name"]).strip() or "Legacy orphan deposits"
         self.tables = LegacyTables(
             user=options["user_table"],
             database=options["database_table"],
@@ -148,9 +123,6 @@ class Command(BaseCommand):
         self.skip_rows: dict[str, list[dict[str, object]]] = defaultdict(list)
         self.warning_stats: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.warning_rows: dict[str, list[dict[str, object]]] = defaultdict(list)
-        self.orphan_partner_pk: int | None = None
-        self.orphan_lead_pk: int | None = None
-
         self.stdout.write(self.style.NOTICE(f"Using legacy tables: {self.tables}"))
 
         if self.dry_run:
@@ -379,66 +351,6 @@ class Command(BaseCommand):
             update_fields["updated_at"] = updated_at
         if update_fields:
             model.all_objects.filter(pk=object_id).update(**update_fields)
-
-    def ensure_orphan_deposit_target(self) -> int:
-        if self.orphan_lead_pk:
-            return self.orphan_lead_pk
-
-        partner = Partner.all_objects.filter(code=self.orphan_partner_code).first()
-        if partner is None:
-            partner = Partner(
-                name="Legacy Orphans",
-                code=self.orphan_partner_code,
-                is_active=True,
-            )
-            if not self.dry_run:
-                partner.save()
-        elif not self.dry_run and (partner.is_deleted or not partner.is_active or partner.name != "Legacy Orphans"):
-            partner.name = "Legacy Orphans"
-            partner.is_active = True
-            partner.is_deleted = False
-            partner.deleted_at = None
-            partner.save(update_fields=["name", "is_active", "is_deleted", "deleted_at", "updated_at"])
-
-        self.orphan_partner_pk = self.mapped_pk(partner.pk, 1)
-
-        lead = Lead.all_objects.filter(
-            partner_id=partner.pk if partner.pk else None,
-            custom_fields__legacy_orphan_deposit_sink=True,
-        ).first()
-        if lead is None:
-            lead = Lead(
-                partner_id=partner.pk if partner.pk else self.orphan_partner_pk,
-                manager_id=None,
-                first_manager_id=None,
-                status_id=None,
-                source="legacy",
-                full_name=self.orphan_lead_name,
-                phone="",
-                email="",
-                geo="",
-                priority=None,
-                next_contact_at=None,
-                last_contacted_at=None,
-                assigned_at=None,
-                first_assigned_at=None,
-                received_at=timezone.now(),
-                custom_fields={"legacy_orphan_deposit_sink": True},
-            )
-            if not self.dry_run:
-                lead.save()
-        elif not self.dry_run:
-            lead.full_name = self.orphan_lead_name
-            lead.source = "legacy"
-            custom_fields = dict(lead.custom_fields or {})
-            custom_fields["legacy_orphan_deposit_sink"] = True
-            lead.custom_fields = custom_fields
-            lead.is_deleted = False
-            lead.deleted_at = None
-            lead.save(update_fields=["full_name", "source", "custom_fields", "is_deleted", "deleted_at", "updated_at"])
-
-        self.orphan_lead_pk = self.mapped_pk(lead.pk, 1)
-        return self.orphan_lead_pk
 
     def import_users(self):
         stage_started_at = time.monotonic()
@@ -912,11 +824,11 @@ class Command(BaseCommand):
         params: list[object] = []
         if self.sample_leads:
             lead_ids = sorted(self.lead_map.keys())
-            if not lead_ids and not self.use_orphan_deposit_lead:
+            if not lead_ids:
                 self.stdout.write(self.style.WARNING("Deposits: skipped because no leads were selected by --sample-leads"))
                 self.log_stage_finished("Deposits", stage_started_at)
                 return
-            where_sql, params = self.build_in_filter("lead_id", lead_ids, include_null=self.use_orphan_deposit_lead)
+            where_sql, params = self.build_in_filter("lead_id", lead_ids, include_null=True)
         total = self.count_rows(self.tables.deposit, where_sql=where_sql, params=params)
         rows = self.iter_rows(
             self.tables.deposit,
@@ -962,24 +874,15 @@ class Command(BaseCommand):
         for index, row in enumerate(rows, start=1):
             self.log_progress("Deposits", index, total, stage_started_at)
             if not row.get("lead_id"):
-                if self.use_orphan_deposit_lead:
-                    lead_id = self.ensure_orphan_deposit_target()
-                    self.record_warning(
-                        "deposits",
-                        "assigned_to_orphan_lead",
-                        {"legacy_deposit_id": row.get("id"), "orphan_lead_id": lead_id},
-                    )
-                else:
-                    skipped += 1
-                    self.record_skip(
-                        "deposits",
-                        "missing_legacy_lead_id",
-                        {"legacy_deposit_id": row.get("id")},
-                    )
-                    continue
+                lead_id = None
+                self.record_warning(
+                    "deposits",
+                    "missing_legacy_lead_id",
+                    {"legacy_deposit_id": row.get("id")},
+                )
             else:
                 lead_id = self.lead_map.get(int(row["lead_id"]))
-            if not lead_id:
+            if lead_id is None and row.get("lead_id"):
                 skipped += 1
                 self.record_skip(
                     "deposits",
@@ -1008,6 +911,14 @@ class Command(BaseCommand):
                     )
             deposit_type = int(row.get("type") or LeadDeposit.Type.DEPOSIT)
             amount = row.get("amount") or Decimal("0.00")
+            if lead_id is None and deposit_type != LeadDeposit.Type.DEPOSIT:
+                skipped += 1
+                self.record_skip(
+                    "deposits",
+                    "orphan_non_regular_type_requires_lead",
+                    {"legacy_deposit_id": row.get("id"), "type": deposit_type},
+                )
+                continue
             if deposit_type == LeadDeposit.Type.FTD and (lead_id in existing_ftd_leads or lead_id in pending_ftd_leads):
                 skipped += 1
                 self.record_skip(
@@ -1039,9 +950,10 @@ class Command(BaseCommand):
                 pending_ftd_leads.add(lead_id)
             elif deposit_type == LeadDeposit.Type.RELOAD:
                 pending_reload_leads.add(lead_id)
-            current_latest = latest_contact_by_lead.get(lead_id)
-            if current_latest is None or created_at > current_latest:
-                latest_contact_by_lead[lead_id] = created_at
+            if lead_id is not None:
+                current_latest = latest_contact_by_lead.get(lead_id)
+                if current_latest is None or created_at > current_latest:
+                    latest_contact_by_lead[lead_id] = created_at
             if len(pending_deposits) >= self.batch_size:
                 flush_pending_deposits()
 

@@ -333,8 +333,13 @@ def _user_can_edit_lead(*, actor_user, lead: Lead) -> bool:
     return False
 
 
-def _assert_deposit_create_allowed(*, actor_user, lead: Lead, manual_type: bool) -> None:
+def _assert_deposit_create_allowed(*, actor_user, lead: Lead | None, manual_type: bool) -> None:
     role = getattr(actor_user, "role", None)
+    if lead is None:
+        if role not in {UserRole.SUPERUSER, UserRole.ADMIN}:
+            raise PermissionDenied("Депозиты без лида могут создавать только админы и суперпользователи")
+        return
+
     lead_manager_role = _lead_manager_role(lead)
 
     if role in {UserRole.SUPERUSER, UserRole.ADMIN}:
@@ -382,7 +387,7 @@ def _filter_deposits_visible_for_user(*, actor_user, queryset, include_teamleade
 def _create_lead_deposit(
     *,
     actor_user,
-    lead: Lead,
+    lead: Lead | None,
     amount,
     requested_type=None,
     reason: str = "",
@@ -394,7 +399,10 @@ def _create_lead_deposit(
     if requested_type is not None:
         dep_type = int(requested_type)
     else:
-        dep_type = _next_deposit_type(lead, actor_role=role)
+        dep_type = LeadDeposit.Type.DEPOSIT if lead is None else _next_deposit_type(lead, actor_role=role)
+
+    if lead is None and dep_type != LeadDeposit.Type.DEPOSIT:
+        raise serializers.ValidationError({"type": "FTD и Reload можно создавать только с лидом"})
 
     if role == UserRole.TEAMLEADER and dep_type != LeadDeposit.Type.FTD:
         raise serializers.ValidationError({"type": "Тимлиды могут создавать только FTD"})
@@ -417,7 +425,8 @@ def _create_lead_deposit(
     except IntegrityError:
         raise _deposit_unique_conflict_error(dep_type)
 
-    _touch_lead_last_contacted(lead, at=dep.created_at)
+    if lead is not None:
+        _touch_lead_last_contacted(lead, at=dep.created_at)
     _log_status_audit(
         event_type=LeadAuditEvent.DEPOSIT_CREATED,
         actor_user=actor_user,
@@ -1746,8 +1755,6 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         lead = serializer.validated_data.get("lead")
-        if lead is None:
-            raise serializers.ValidationError({"lead": "Это поле обязательно"})
         dep = _create_lead_deposit(
             actor_user=request.user,
             lead=lead,
@@ -1773,7 +1780,11 @@ class LeadDepositViewSet(RBACActionMixin, viewsets.ModelViewSet):
             update_fields.append("amount")
         if "type" in validated:
             new_type = int(validated["type"])
+            if deposit.lead_id is None and new_type != LeadDeposit.Type.DEPOSIT:
+                raise serializers.ValidationError({"type": "FTD и Reload можно создавать только с лидом"})
             if new_type != deposit.type and new_type in {LeadDeposit.Type.FTD, LeadDeposit.Type.RELOAD}:
+                if deposit.lead_id is None:
+                    raise serializers.ValidationError({"type": "FTD и Reload можно создавать только с лидом"})
                 if LeadDeposit.objects.filter(lead=deposit.lead, type=new_type, is_deleted=False).exclude(id=deposit.id).exists():
                     raise _deposit_unique_conflict_error(new_type)
             deposit.type = new_type

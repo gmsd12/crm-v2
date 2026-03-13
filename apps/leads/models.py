@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.db.models import Q
 from django.conf import settings
@@ -158,6 +158,14 @@ class Lead(BaseModel):
     def __str__(self) -> str:
         return f"Lead {self.pk} partner={self.partner_id}"
 
+    def hard_delete(self, using=None, keep_parents=False):
+        db_alias = using or self._state.db
+        with transaction.atomic(using=db_alias):
+            for attachment in LeadAttachment.all_objects.using(db_alias).filter(lead_id=self.id).order_by("id"):
+                attachment.hard_delete(using=db_alias, keep_parents=keep_parents)
+            LeadDeposit.all_objects.using(db_alias).filter(lead_id=self.id).hard_delete()
+            return super().hard_delete(using=db_alias, keep_parents=keep_parents)
+
 
 class LeadDeposit(BaseModel):
     class Type(models.IntegerChoices):
@@ -165,7 +173,13 @@ class LeadDeposit(BaseModel):
         RELOAD = 2, "Reload"
         DEPOSIT = 3, "Deposit"
 
-    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name="deposits")
+    lead = models.ForeignKey(
+        Lead,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="deposits",
+    )
     creator = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

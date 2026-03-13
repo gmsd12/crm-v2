@@ -593,7 +593,7 @@ class LeadAttachmentWriteSerializer(serializers.Serializer):
 
 
 class LeadDepositSerializer(serializers.ModelSerializer):
-    lead_full_name = serializers.CharField(source="lead.full_name", read_only=True)
+    lead_full_name = serializers.SerializerMethodField()
     creator_username = serializers.CharField(source="creator.username", read_only=True)
     creator_first_name = serializers.CharField(source="creator.first_name", read_only=True)
     creator_last_name = serializers.CharField(source="creator.last_name", read_only=True)
@@ -618,6 +618,12 @@ class LeadDepositSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_lead_full_name(self, obj):
+        lead = getattr(obj, "lead", None)
+        if not lead:
+            return None
+        return lead.full_name
 
 
 class LeadDepositCreateSerializer(serializers.Serializer):

@@ -126,13 +126,13 @@
 - `--comment-table`
 - `--deposit-table`
 - `--record-table`
-- `--no-orphan-deposit-lead` — пропускать orphan deposits без `lead_id`
 
 Что важно знать:
 - `Database` из legacy мапится в новый `Partner`
 - `Status.tid` мапится в `LeadStatus.code`
 - дубли по телефону не теряются: первый лид живой, остальные импортируются как soft-deleted
-- orphan deposits можно складывать в технического лида
+- legacy deposits без `lead_id` теперь импортируются с `lead=NULL`
+- legacy orphan `FTD/Reload` без `lead_id` пропускаются и попадают в skip-report
 - skip/warning отчеты пишутся в `legacy/reports/`
 
 
